@@ -9,6 +9,8 @@ from typing import Any
 
 
 MODES = {"research", "goldmine", "skill-feedback", "discover"}
+CONTROL_CHANNELS = {"codex-browser", "user-chrome", "mac-goal", "computer-use"}
+DEFAULT_CONTROL_CHANNEL = "codex-browser"
 DEFAULT_KEYWORDS = {
     "goldmine": ["ai coding", "codex", "claude code", "skill", "mcp", "workflow", "工作流", "插件", "开源", "经验"],
     "discover": ["skill", "workflow", "harness", "mcp", "cli", "插件", "工具", "开源", "推荐"],
@@ -19,6 +21,13 @@ def validate_mode(mode: str) -> str:
     normalized = mode.strip().lower()
     if normalized not in MODES:
         raise ValueError(f"未知模式：{mode}")
+    return normalized
+
+
+def validate_channel(channel: str) -> str:
+    normalized = channel.strip().lower()
+    if normalized not in CONTROL_CHANNELS:
+        raise ValueError(f"未知操控通道：{channel}")
     return normalized
 
 
@@ -120,15 +129,18 @@ def build_browser_task(
     skill_names: list[str],
     max_topics: int,
     max_replies: int,
+    control_channel: str = DEFAULT_CONTROL_CHANNEL,
 ) -> dict[str, Any]:
     mode = validate_mode(mode)
+    control_channel = validate_channel(control_channel)
     return {
         "mode": mode,
+        "control_channel": control_channel,
         "query": query,
         "skill_names": skill_names,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "budget": {"max_topics": max_topics, "max_replies_per_topic": max_replies},
-        "instructions": _browser_instructions(mode),
+        "instructions": _browser_instructions(mode, control_channel),
         "candidates": [
             {
                 "id": _safe_int(item.get("id")) or 0,
@@ -147,11 +159,17 @@ def _normalize_state(state: dict[str, Any]) -> dict[str, Any]:
     return {"read_topic_ids": read_ids, "synced_skill_names": synced_names}
 
 
-def _browser_instructions(mode: str) -> str:
+def _browser_instructions(mode: str, control_channel: str) -> str:
+    channel_notes = {
+        "codex-browser": "请使用 Codex 内置浏览器打开候选 Linux.do 帖子。首次需要登录时请让用户完成登录，后续复用已保存登录态。",
+        "user-chrome": "请使用用户本机 Chrome 中已经打开或按标签组整理的 Linux.do 帖子，理解标签组和页面之间的关系；不要把这个通道当作全站搜索。",
+        "mac-goal": "这是未来 Mac /goal 长任务通道。执行前必须明确停止标准、预算和阶段汇报，不要在第一版里假装已经能后台持续冲浪。",
+        "computer-use": "这是实验性 computer-use 通道。仅在普通浏览器能力不足时考虑，不用于常规帖子阅读。",
+    }
     return (
-        "请使用 Codex 内置浏览器打开候选 Linux.do 帖子。"
-        "读取首帖和高价值回复，区分事实、观点、争议和行动建议。"
-        f"当前模式：{mode}。不要生成固定日报，只输出本轮任务结果。"
+        channel_notes[control_channel]
+        + "读取首帖和高价值回复，区分事实、观点、争议和行动建议。"
+        + f"当前模式：{mode}。不要生成固定日报，只输出本轮任务结果。"
     )
 
 
@@ -284,7 +302,15 @@ def run_plan(args: argparse.Namespace) -> int:
         read_ids=set(state["read_topic_ids"]),
         limit=args.max_topics,
     )
-    task = build_browser_task(args.mode, args.query, candidates, skill_names, args.max_topics, args.max_replies)
+    task = build_browser_task(
+        args.mode,
+        args.query,
+        candidates,
+        skill_names,
+        args.max_topics,
+        args.max_replies,
+        args.channel,
+    )
     write_json(args.output / f"browser_task_{args.mode}.json", task)
     save_state(args.state, state)
     return 0
@@ -320,6 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = subparsers.add_parser("plan", help="生成 Codex 内置浏览器阅读任务包。")
     plan.add_argument("--mode", required=True, choices=sorted(MODES))
+    plan.add_argument("--channel", choices=sorted(CONTROL_CHANNELS), default=DEFAULT_CONTROL_CHANNEL)
     plan.add_argument("--query", default="")
     plan.add_argument("--skills", nargs="*", default=[])
     plan.add_argument("--topics", type=Path, default=Path("output/linuxdo_skill_research/topic_details_top220.json"))
@@ -350,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.mode = validate_mode(args.mode) if hasattr(args, "mode") else ""
+    args.channel = validate_channel(args.channel) if hasattr(args, "channel") else ""
     return args.func(args)
 
 
