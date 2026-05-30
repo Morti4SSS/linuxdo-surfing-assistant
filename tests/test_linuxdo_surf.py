@@ -2,6 +2,8 @@ import importlib.util
 import json
 import unittest
 from pathlib import Path
+from datetime import datetime as RealDatetime
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "linuxdo_surf.py"
@@ -52,6 +54,64 @@ class LinuxdoSurfTests(unittest.TestCase):
         ranked = linuxdo_surf.rank_topics(topics, mode="research", query="Codex")
 
         self.assertEqual([item["id"] for item in ranked], ["2"])
+
+    def test_build_frontier_queue_splits_new_active_old_and_low_traffic_topics(self):
+        topics = [
+            {
+                "id": 1,
+                "title": "Codex 新工作流分享",
+                "first_text": "codex workflow skill",
+                "created_at": "2026-05-30T09:00:00",
+                "last_posted_at": "2026-05-30T10:00:00",
+                "views": 3000,
+                "reply_count": 8,
+            },
+            {
+                "id": 2,
+                "title": "Claude Code 老经验帖更新",
+                "first_text": "老帖里总结 workflow 踩坑",
+                "created_at": "2026-03-01T09:00:00",
+                "last_posted_at": "2026-05-30T10:00:00",
+                "views": 5000,
+                "reply_count": 80,
+            },
+            {
+                "id": 3,
+                "title": "冷门 MCP 配置求助",
+                "first_text": "mcp 工具配置问题",
+                "created_at": "2026-05-20T09:00:00",
+                "last_posted_at": "2026-05-20T10:00:00",
+                "views": 120,
+                "reply_count": 2,
+            },
+        ]
+
+        frontier = linuxdo_surf.build_frontier_queue(
+            topics,
+            mode="goldmine",
+            query="",
+            read_ids=set(),
+            now="2026-05-31T00:00:00",
+        )
+
+        self.assertEqual([item["id"] for item in frontier["queues"]["new"]], [1])
+        self.assertEqual([item["id"] for item in frontier["queues"]["active-old"]], [2])
+        self.assertEqual([item["id"] for item in frontier["queues"]["low-traffic"]], [3])
+
+    def test_select_next_batch_respects_primary_queue_quotas_and_deduplicates(self):
+        frontier = {
+            "queues": {
+                "new": [{"id": 1, "queue": "new"}, {"id": 2, "queue": "new"}],
+                "active-old": [{"id": 3, "queue": "active-old"}, {"id": 4, "queue": "active-old"}],
+                "low-traffic": [{"id": 5, "queue": "low-traffic"}, {"id": 3, "queue": "low-traffic"}],
+            },
+            "quotas": {"new": 0.4, "active-old": 0.4, "low-traffic": 0.2},
+        }
+
+        batch = linuxdo_surf.select_next_batch(frontier, max_topics=5)
+
+        self.assertEqual([item["id"] for item in batch], [1, 2, 3, 4, 5])
+        self.assertEqual(batch[-1]["queue"], "low-traffic")
 
     def test_load_state_returns_default_when_missing(self):
         with TemporaryDirectoryPath() as tmp_path:
@@ -198,6 +258,31 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(package["evidence"][0]["topic_links"], ["https://linux.do/t/topic/10"])
         self.assertEqual(package["evidence"][0]["positive_feedback"], ["触发条件清晰很有用"])
 
+    def test_extract_discovery_items_builds_author_reference_and_tool_queues(self):
+        readings = [
+            {
+                "id": 10,
+                "url": "https://linux.do/t/topic/10",
+                "title": "Codex workflow",
+                "author": "alice",
+                "summary": "推荐了 workflow-kit 和 skill-router。",
+                "tools": ["workflow-kit", "go"],
+                "high_value_replies": [
+                    {
+                        "id": 99,
+                        "author": "bob",
+                        "text": "之前有个帖子 https://linux.do/t/topic/20 讨论 skill-router 的风险。",
+                    }
+                ],
+            }
+        ]
+
+        discovery = linuxdo_surf.extract_discovery_items(readings)
+
+        self.assertEqual(discovery["author-tracking"][0]["username"], "alice")
+        self.assertEqual(discovery["comment-reference"][0]["target_url"], "https://linux.do/t/topic/20")
+        self.assertEqual([item["name"] for item in discovery["tool-lookup"]], ["workflow-kit", "skill-router"])
+
     def test_cli_plan_writes_browser_task_and_state(self):
         with TemporaryDirectoryPath() as tmp_path:
             topics_path = tmp_path / "topics.json"
@@ -274,6 +359,92 @@ class LinuxdoSurfTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(task["control_channel"], "user-chrome")
+
+    def test_cli_goal_plan_writes_frontier_queue_and_goal_task(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            topics_path = tmp_path / "topics.json"
+            topics_path.write_text(
+                json.dumps({"topics": [{"id": 1, "title": "Codex workflow", "first_text": "workflow", "views": 10}]}),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+            state_path = tmp_path / "state.json"
+            queue_path = tmp_path / "frontier.json"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "goal-plan",
+                    "--mode",
+                    "goldmine",
+                    "--topics",
+                    str(topics_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(state_path),
+                    "--queue",
+                    str(queue_path),
+                    "--max-topics",
+                    "1",
+                ]
+            )
+
+            frontier = json.loads(queue_path.read_text(encoding="utf-8"))
+            task = json.loads((out_dir / "goal_task_goldmine.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(task["control_channel"], "mac-goal")
+        self.assertEqual(task["frontier_queue"], str(queue_path))
+        self.assertEqual(task["next_batch"][0]["id"], 1)
+        self.assertIn("low-traffic", frontier["queues"])
+
+    def test_cli_goal_plan_preserves_existing_discovery_queues(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            topics_path = tmp_path / "topics.json"
+            topics_path.write_text(
+                json.dumps({"topics": [{"id": 1, "title": "Codex workflow", "first_text": "workflow", "views": 10}]}),
+                encoding="utf-8",
+            )
+            queue_path = tmp_path / "frontier.json"
+            queue_path.write_text(
+                json.dumps(
+                    {
+                        "queues": {"new": [], "active-old": [], "low-traffic": []},
+                        "discovery_queues": {
+                            "author-tracking": [{"username": "alice", "source_topic_ids": [9], "score": 1}],
+                            "comment-reference": [],
+                            "tool-lookup": [{"name": "workflow-kit", "source_topic_ids": [9], "evidence_count": 1}],
+                        },
+                        "quotas": {"new": 0.4, "active-old": 0.4, "low-traffic": 0.2},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "goal-plan",
+                    "--mode",
+                    "goldmine",
+                    "--topics",
+                    str(topics_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(tmp_path / "state.json"),
+                    "--queue",
+                    str(queue_path),
+                    "--max-topics",
+                    "1",
+                ]
+            )
+
+            frontier = json.loads(queue_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(frontier["discovery_queues"]["author-tracking"][0]["username"], "alice")
+        self.assertEqual(frontier["discovery_queues"]["tool-lookup"][0]["name"], "workflow-kit")
 
     def test_cli_plan_rejects_unknown_channel(self):
         with TemporaryDirectoryPath() as tmp_path:
@@ -372,6 +543,49 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(result["read_topic_ids"], [2])
         self.assertEqual(state["read_topic_ids"], [2])
 
+    def test_cli_session_writes_session_record_and_updates_state(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            task_path = tmp_path / "goal_task_goldmine.json"
+            task_path.write_text(
+                json.dumps({"mode": "goldmine", "query": "", "next_batch": [{"id": 10}]}),
+                encoding="utf-8",
+            )
+            readings_path = tmp_path / "readings.json"
+            readings_path.write_text(
+                json.dumps(
+                    {"readings": [{"id": 10, "title": "工具讨论", "summary": "推荐 workflow-kit", "tools": ["workflow-kit"]}]}
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+            state_path = tmp_path / "state.json"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "session",
+                    "--task",
+                    str(task_path),
+                    "--readings",
+                    str(readings_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(state_path),
+                    "--stop-reason",
+                    "达到本轮深读预算",
+                ]
+            )
+
+            session_files = list(out_dir.glob("session_goldmine_*.json"))
+            session = json.loads(session_files[0].read_text(encoding="utf-8"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(session["stop_reason"], "达到本轮深读预算")
+        self.assertEqual(session["read_topic_ids"], [10])
+        self.assertEqual(session["discovery_queues"]["tool-lookup"][0]["name"], "workflow-kit")
+        self.assertEqual(state["read_topic_ids"], [10])
+
     def test_cli_result_filters_readings_to_task_candidates(self):
         with TemporaryDirectoryPath() as tmp_path:
             task_path = tmp_path / "browser_task_research.json"
@@ -420,6 +634,239 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(result["read_topic_ids"], [2])
         self.assertEqual([item["id"] for item in result["items"]], [2])
+
+    def test_cli_session_filters_readings_to_next_batch(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            task_path = tmp_path / "goal_task_goldmine.json"
+            task_path.write_text(
+                json.dumps({"mode": "goldmine", "query": "", "next_batch": [{"id": 2}]}),
+                encoding="utf-8",
+            )
+            readings_path = tmp_path / "readings.json"
+            readings_path.write_text(
+                json.dumps(
+                    {
+                        "readings": [
+                            {"id": 2, "title": "候选", "summary": "有效"},
+                            {"id": 99, "title": "混入旧帖", "summary": "不该写入"},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+            state_path = tmp_path / "state.json"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "session",
+                    "--task",
+                    str(task_path),
+                    "--readings",
+                    str(readings_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(state_path),
+                    "--stop-reason",
+                    "达到本轮深读预算",
+                ]
+            )
+
+            session_file = next(out_dir.glob("session_goldmine_*.json"))
+            session = json.loads(session_file.read_text(encoding="utf-8"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([item["id"] for item in session["items"]], [2])
+        self.assertEqual(state["read_topic_ids"], [2])
+
+    def test_cli_session_preserves_context_and_merges_discovery_into_frontier(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            queue_path = tmp_path / "frontier.json"
+            queue_path.write_text(
+                json.dumps(
+                    {
+                        "queues": {"new": [], "active-old": [], "low-traffic": []},
+                        "discovery_queues": {"author-tracking": [], "comment-reference": [], "tool-lookup": []},
+                        "quotas": {"new": 0.4, "active-old": 0.4, "low-traffic": 0.2},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            task_path = tmp_path / "goal_task_goldmine.json"
+            task_path.write_text(
+                json.dumps({"mode": "goldmine", "query": "", "frontier_queue": str(queue_path), "next_batch": [{"id": 10}]}),
+                encoding="utf-8",
+            )
+            readings_path = tmp_path / "readings.json"
+            readings_path.write_text(
+                json.dumps(
+                    {
+                        "readings": [
+                            {
+                                "id": 10,
+                                "title": "老帖更新",
+                                "url": "https://linux.do/t/topic/10",
+                                "author": "alice",
+                                "summary": "推荐 Cursor 和 Claude Code，也提到 workflow-kit。",
+                                "tools": ["workflow-kit"],
+                                "first_post": "首帖经验",
+                                "historical_replies": [{"id": 20, "text": "历史关键回复"}],
+                                "recent_replies": [{"id": 21, "text": "近期新回复"}],
+                                "high_value_replies": [
+                                    {"id": 22, "text": "参考 https://linux.do/t/topic/30 和 workflow-kit", "author": "bob"}
+                                ],
+                                "positive_feedback": ["好用"],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "session",
+                    "--task",
+                    str(task_path),
+                    "--readings",
+                    str(readings_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(tmp_path / "state.json"),
+                    "--stop-reason",
+                    "达到本轮深读预算",
+                ]
+            )
+
+            session_file = next(out_dir.glob("session_goldmine_*.json"))
+            session = json.loads(session_file.read_text(encoding="utf-8"))
+            frontier = json.loads(queue_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        item = session["items"][0]
+        self.assertEqual(item["author"], "alice")
+        self.assertEqual(item["first_post"], "首帖经验")
+        self.assertEqual(item["historical_replies"][0]["id"], 20)
+        self.assertEqual(item["recent_replies"][0]["id"], 21)
+        self.assertEqual(item["high_value_replies"][0]["id"], 22)
+        self.assertEqual(frontier["discovery_queues"]["author-tracking"][0]["username"], "alice")
+        self.assertEqual(frontier["discovery_queues"]["comment-reference"][0]["target_type"], "linuxdo-topic")
+        self.assertEqual(frontier["discovery_queues"]["comment-reference"][0]["depth"], 1)
+        self.assertEqual(
+            [item["name"] for item in frontier["discovery_queues"]["tool-lookup"]],
+            ["workflow-kit", "Cursor", "Claude Code"],
+        )
+
+    def test_extract_discovery_items_merges_author_and_tool_evidence(self):
+        readings = [
+            {
+                "id": 1,
+                "url": "https://linux.do/t/topic/1",
+                "author": "alice",
+                "summary": "Cursor 很顺手。",
+                "positive_feedback": ["稳定"],
+            },
+            {
+                "id": 2,
+                "url": "https://linux.do/t/topic/2",
+                "author": "alice",
+                "summary": "Cursor 也有上下文成本。",
+                "negative_feedback": ["贵"],
+            },
+        ]
+
+        discovery = linuxdo_surf.extract_discovery_items(readings)
+
+        author = discovery["author-tracking"][0]
+        tool = discovery["tool-lookup"][0]
+        self.assertEqual(author["source_topic_ids"], [1, 2])
+        self.assertEqual(author["score"], 2)
+        self.assertEqual(tool["name"], "Cursor")
+        self.assertEqual(tool["source_topic_ids"], [1, 2])
+        self.assertEqual(tool["evidence_count"], 2)
+        self.assertEqual(tool["positive_count"], 1)
+        self.assertEqual(tool["negative_count"], 1)
+
+    def test_extract_discovery_items_counts_string_feedback_as_one_item(self):
+        readings = [
+            {
+                "id": 1,
+                "url": "https://linux.do/t/topic/1",
+                "summary": "workflow-kit 很顺手。",
+                "tools": ["workflow-kit"],
+                "positive_feedback": "好用",
+                "negative_feedback": "贵",
+            }
+        ]
+
+        discovery = linuxdo_surf.extract_discovery_items(readings)
+
+        tool = discovery["tool-lookup"][0]
+        self.assertEqual(tool["positive_count"], 1)
+        self.assertEqual(tool["negative_count"], 1)
+
+    def test_cli_session_does_not_overwrite_same_second_records(self):
+        class FixedDatetime:
+            @staticmethod
+            def now():
+                return RealDatetime(2026, 5, 31, 12, 0, 0, 123456)
+
+        with TemporaryDirectoryPath() as tmp_path:
+            task_path = tmp_path / "goal_task_goldmine.json"
+            task_path.write_text(
+                json.dumps({"mode": "goldmine", "query": "", "next_batch": [{"id": 10}]}),
+                encoding="utf-8",
+            )
+            readings_path = tmp_path / "readings.json"
+            readings_path.write_text(
+                json.dumps({"readings": [{"id": 10, "title": "工具讨论", "summary": "推荐 workflow-kit"}]}),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+
+            with patch.object(linuxdo_surf, "datetime", FixedDatetime):
+                first = linuxdo_surf.main(
+                    [
+                        "session",
+                        "--task",
+                        str(task_path),
+                        "--readings",
+                        str(readings_path),
+                        "--output",
+                        str(out_dir),
+                        "--state",
+                        str(tmp_path / "state.json"),
+                        "--stop-reason",
+                        "达到本轮深读预算",
+                    ]
+                )
+                second = linuxdo_surf.main(
+                    [
+                        "session",
+                        "--task",
+                        str(task_path),
+                        "--readings",
+                        str(readings_path),
+                        "--output",
+                        str(out_dir),
+                        "--state",
+                        str(tmp_path / "state.json"),
+                        "--stop-reason",
+                        "达到本轮深读预算",
+                    ]
+                )
+
+            session_files = list(out_dir.glob("session_goldmine_*.json"))
+
+        self.assertEqual(first, 0)
+        self.assertEqual(second, 0)
+        self.assertEqual(len(session_files), 2)
 
     def test_cli_evidence_updates_synced_skill_state_when_state_is_given(self):
         with TemporaryDirectoryPath() as tmp_path:

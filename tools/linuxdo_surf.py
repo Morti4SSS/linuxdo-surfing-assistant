@@ -11,6 +11,9 @@ from typing import Any
 MODES = {"research", "goldmine", "skill-feedback", "discover"}
 CONTROL_CHANNELS = {"codex-browser", "user-chrome", "mac-goal", "computer-use"}
 DEFAULT_CONTROL_CHANNEL = "codex-browser"
+PRIMARY_QUEUE_NAMES = ("new", "active-old", "low-traffic")
+DISCOVERY_QUEUE_NAMES = ("author-tracking", "comment-reference", "tool-lookup", "skill-workflow-evidence")
+DEFAULT_QUEUE_QUOTAS = {"new": 0.4, "active-old": 0.4, "low-traffic": 0.2}
 DEFAULT_KEYWORDS = {
     "goldmine": ["ai coding", "codex", "claude code", "skill", "mcp", "workflow", "工作流", "插件", "开源", "经验"],
     "discover": ["skill", "workflow", "harness", "mcp", "cli", "插件", "工具", "开源", "推荐"],
@@ -53,6 +56,102 @@ def rank_topics(
         ranked.append({**topic, "surf_score": round(score, 2)})
     ranked.sort(key=lambda item: (-item["surf_score"], str(item.get("title", ""))))
     return ranked[:limit]
+
+
+def build_frontier_queue(
+    topics: list[dict[str, Any]],
+    mode: str,
+    query: str = "",
+    skill_names: list[str] | None = None,
+    read_ids: set[int] | None = None,
+    now: str | datetime | None = None,
+    max_candidates: int = 80,
+) -> dict[str, Any]:
+    mode = validate_mode(mode)
+    read_ids = read_ids or set()
+    current_time = _coerce_datetime(now) or datetime.now()
+    queues = {name: [] for name in PRIMARY_QUEUE_NAMES}
+    for topic in rank_topics(topics, mode, query, skill_names or [], read_ids, max_candidates):
+        queue_name = _primary_queue_for_topic(topic, current_time)
+        queues[queue_name].append(_frontier_item(topic, queue_name))
+    return {
+        "created_at": current_time.isoformat(timespec="seconds"),
+        "mode": mode,
+        "query": query,
+        "queues": queues,
+        "discovery_queues": {name: [] for name in DISCOVERY_QUEUE_NAMES},
+        "quotas": dict(DEFAULT_QUEUE_QUOTAS),
+    }
+
+
+def select_next_batch(frontier: dict[str, Any], max_topics: int) -> list[dict[str, Any]]:
+    _validate_positive("max-topics", max_topics)
+    quotas = frontier.get("quotas", DEFAULT_QUEUE_QUOTAS)
+    queues = frontier.get("queues", {})
+    selected: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+
+    for queue_name in PRIMARY_QUEUE_NAMES:
+        quota_count = max(1, int(round(max_topics * float(quotas.get(queue_name, 0)))))
+        for item in queues.get(queue_name, [])[:quota_count]:
+            item_id = _safe_int(item.get("id"))
+            if item_id is None or item_id in seen_ids:
+                continue
+            selected.append(item)
+            seen_ids.add(item_id)
+            if len(selected) >= max_topics:
+                return selected
+
+    for queue_name in PRIMARY_QUEUE_NAMES:
+        for item in queues.get(queue_name, []):
+            item_id = _safe_int(item.get("id"))
+            if item_id is None or item_id in seen_ids:
+                continue
+            selected.append(item)
+            seen_ids.add(item_id)
+            if len(selected) >= max_topics:
+                return selected
+    return selected
+
+
+def _primary_queue_for_topic(topic: dict[str, Any], now: datetime) -> str:
+    created_at = _topic_datetime(topic, "created_at")
+    last_posted_at = _topic_datetime(topic, "last_posted_at") or _topic_datetime(topic, "bumped_at")
+    if created_at and last_posted_at:
+        topic_age_days = (now - created_at).days
+        active_age_days = (now - last_posted_at).days
+        if topic_age_days >= 30 and active_age_days <= 14:
+            return "active-old"
+    views = _safe_int(topic.get("views")) or 0
+    replies = _safe_int(topic.get("reply_count")) or 0
+    if views <= 500 and replies <= 10:
+        return "low-traffic"
+    return "new"
+
+
+def _frontier_item(topic: dict[str, Any], queue_name: str) -> dict[str, Any]:
+    topic_id = _safe_int(topic.get("id")) or 0
+    return {
+        "id": topic_id,
+        "title": topic.get("title", ""),
+        "url": topic.get("url") or f"https://linux.do/t/topic/{topic_id}",
+        "queue": queue_name,
+        "surf_score": topic.get("surf_score", 0),
+        "reason": _queue_reason(queue_name),
+        "created_at": topic.get("created_at", ""),
+        "last_posted_at": topic.get("last_posted_at") or topic.get("bumped_at", ""),
+        "views": _safe_int(topic.get("views")) or 0,
+        "reply_count": _safe_int(topic.get("reply_count")) or 0,
+    }
+
+
+def _queue_reason(queue_name: str) -> str:
+    reasons = {
+        "new": "新帖或近期候选",
+        "active-old": "老帖近期活跃，需要结合历史上下文阅读",
+        "low-traffic": "低流量但可能有价值，保留探索预算",
+    }
+    return reasons.get(queue_name, queue_name)
 
 
 def _keywords_for(mode: str, query: str, skill_names: list[str]) -> list[str]:
@@ -153,6 +252,36 @@ def build_browser_task(
     }
 
 
+def build_goal_task(
+    mode: str,
+    query: str,
+    frontier_path: Path,
+    state_path: Path,
+    output_path: Path,
+    next_batch: list[dict[str, Any]],
+    max_topics: int,
+    max_replies: int,
+) -> dict[str, Any]:
+    mode = validate_mode(mode)
+    return {
+        "mode": mode,
+        "control_channel": "mac-goal",
+        "query": query,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "frontier_queue": str(frontier_path),
+        "state": str(state_path),
+        "output": str(output_path),
+        "budget": {"max_topics": max_topics, "max_replies_per_topic": max_replies},
+        "stop_conditions": [
+            "next_batch 为空",
+            "达到本轮深读预算",
+            "连续批次没有发现高价值候选",
+        ],
+        "instructions": _goal_instructions(mode),
+        "next_batch": next_batch,
+    }
+
+
 def _normalize_state(state: dict[str, Any]) -> dict[str, Any]:
     read_ids = sorted({int(item) for item in state.get("read_topic_ids", []) if str(item).strip().isdigit()})
     synced_names = _unique([str(item).strip() for item in state.get("synced_skill_names", []) if str(item).strip()])
@@ -173,6 +302,14 @@ def _browser_instructions(mode: str, control_channel: str) -> str:
     )
 
 
+def _goal_instructions(mode: str) -> str:
+    return (
+        "用于 Mac /goal 长任务：按 next_batch 逐帖阅读 Linux.do，保存每帖摘要、关键证据、工具名、作者、"
+        "高价值回复和可继续扩展的引用。活跃老帖必须阅读首帖、关键历史回复和近期回复，不要只看最新回复。"
+        f"当前模式：{mode}。完成停止条件后调用 session 记录本轮结果。"
+    )
+
+
 def build_mode_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> dict[str, Any]:
     items = []
     for reading in readings:
@@ -188,6 +325,11 @@ def build_mode_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> d
                 "risk_notes": reading.get("risk_notes", []),
                 "tools": reading.get("tools", []),
                 "action_items": reading.get("action_items", []),
+                "author": reading.get("author", ""),
+                "first_post": reading.get("first_post", ""),
+                "historical_replies": reading.get("historical_replies", []),
+                "recent_replies": reading.get("recent_replies", []),
+                "high_value_replies": reading.get("high_value_replies", []),
             }
         )
     mode = str(task.get("mode", ""))
@@ -198,6 +340,21 @@ def build_mode_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> d
         "read_topic_ids": sorted({item["id"] for item in items if item["id"]}),
         "mode_summary": _mode_summary(mode, str(task.get("query", "")), items),
         "items": items,
+    }
+
+
+def build_session_record(task: dict[str, Any], readings: list[dict[str, Any]], stop_reason: str) -> dict[str, Any]:
+    mode = validate_mode(str(task.get("mode", "")))
+    result = build_mode_result(task, readings)
+    return {
+        "mode": mode,
+        "query": task.get("query", ""),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "stop_reason": stop_reason,
+        "read_topic_ids": result["read_topic_ids"],
+        "items": result["items"],
+        "mode_summary": result["mode_summary"],
+        "discovery_queues": extract_discovery_items(readings),
     }
 
 
@@ -220,6 +377,181 @@ def build_skill_evidence_package(skill_names: list[str], readings: list[dict[str
             }
         )
     return {"created_at": datetime.now().isoformat(timespec="seconds"), "evidence": evidence}
+
+
+def extract_discovery_items(readings: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    discovery = {name: [] for name in DISCOVERY_QUEUE_NAMES}
+    for reading in readings:
+        _add_author_discovery(discovery, reading)
+        _add_tool_discovery(discovery, reading)
+        _add_reference_discovery(discovery, reading)
+    return {
+        "author-tracking": _merge_author_discovery(discovery["author-tracking"]),
+        "comment-reference": _dedupe_discovery_items(discovery["comment-reference"]),
+        "tool-lookup": _merge_tool_discovery(discovery["tool-lookup"]),
+        "skill-workflow-evidence": _dedupe_discovery_items(discovery["skill-workflow-evidence"]),
+    }
+
+
+def _add_author_discovery(discovery: dict[str, list[dict[str, Any]]], reading: dict[str, Any]) -> None:
+    username = str(reading.get("author", "")).strip()
+    if not username:
+        return
+    topic_id = _safe_int(reading.get("id")) or 0
+    discovery["author-tracking"].append(
+        {
+            "username": username,
+            "profile_url": f"https://linux.do/u/{username}",
+            "source_topic_ids": [topic_id] if topic_id else [],
+            "reason": "在高价值阅读结果中出现，适合追踪作者后续帖子",
+            "score": 1,
+            "last_seen_at": datetime.now().isoformat(timespec="seconds"),
+            "cooldown_until": "",
+        }
+    )
+
+
+def _add_tool_discovery(discovery: dict[str, list[dict[str, Any]]], reading: dict[str, Any]) -> None:
+    names = _extract_tool_names(reading)
+    if not names:
+        return
+    topic_id = _safe_int(reading.get("id")) or 0
+    source_url = str(reading.get("url", "")).strip()
+    positive_count = len(_field_as_list(reading.get("positive_feedback", [])))
+    negative_count = len(_field_as_list(reading.get("negative_feedback", []))) + len(_field_as_list(reading.get("risk_notes", [])))
+    for name in names:
+        discovery["tool-lookup"].append(
+            {
+                "name": name,
+                "aliases": [],
+                "source_topic_ids": [topic_id] if topic_id else [],
+                "source_urls": [source_url] if source_url else [],
+                "category": "unknown",
+                "evidence_count": 1,
+                "positive_count": positive_count,
+                "negative_count": negative_count,
+                "score": 1 + positive_count - negative_count,
+            }
+        )
+
+
+def _add_reference_discovery(discovery: dict[str, list[dict[str, Any]]], reading: dict[str, Any]) -> None:
+    source_topic_id = _safe_int(reading.get("id")) or 0
+    replies = reading.get("high_value_replies", []) or []
+    for reply in replies:
+        if not isinstance(reply, dict):
+            continue
+        text = str(reply.get("text", ""))
+        for target_url in re.findall(r"https://linux\.do/t/topic/\d+", text):
+            discovery["comment-reference"].append(
+                {
+                    "target_url": target_url,
+                    "target_type": "linuxdo-topic",
+                    "source_topic_id": source_topic_id,
+                    "source_reply_id": _safe_int(reply.get("id")) or 0,
+                    "source_author": reply.get("author", ""),
+                    "reason": "高价值回复引用了相关帖子，需要扩展阅读上下文",
+                    "score": 1,
+                    "depth": 1,
+                }
+            )
+
+
+def _extract_tool_names(reading: dict[str, Any]) -> list[str]:
+    explicit = reading.get("tools", []) or []
+    if isinstance(explicit, str):
+        explicit = [explicit]
+    names = [str(name).strip() for name in explicit]
+    summary = str(reading.get("summary", ""))
+    names.extend(re.findall(r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)(?![A-Za-z0-9_-])", summary))
+    names.extend(re.findall(r"(?<![A-Za-z0-9_-])([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){0,2})(?![A-Za-z0-9_-])", summary))
+    return _unique([name for name in names if _is_useful_tool_name(name)])
+
+
+def _is_useful_tool_name(name: str) -> bool:
+    stripped = name.strip()
+    return len(stripped) >= 3 and any(char.isalpha() for char in stripped)
+
+
+def _dedupe_discovery_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen = set()
+    result = []
+    for item in items:
+        key = (
+            item.get("username")
+            or item.get("target_url")
+            or item.get("name")
+            or json.dumps(item, ensure_ascii=False, sort_keys=True)
+        )
+        normalized = str(key).lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(item)
+    return result
+
+
+def _merge_author_discovery(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in items:
+        username = str(item.get("username", "")).strip()
+        if not username:
+            continue
+        key = username.lower()
+        if key not in merged:
+            merged[key] = {**item, "source_topic_ids": list(item.get("source_topic_ids", [])), "score": 0}
+        merged[key]["source_topic_ids"] = _merge_int_lists(
+            merged[key].get("source_topic_ids", []),
+            item.get("source_topic_ids", []),
+        )
+        merged[key]["score"] = len(merged[key]["source_topic_ids"]) or 1
+    return list(merged.values())
+
+
+def _merge_tool_discovery(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in items:
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key not in merged:
+            merged[key] = {
+                **item,
+                "source_topic_ids": [],
+                "source_urls": [],
+                "evidence_count": 0,
+                "positive_count": 0,
+                "negative_count": 0,
+                "score": 0,
+            }
+        target = merged[key]
+        target["source_topic_ids"] = _merge_int_lists(target.get("source_topic_ids", []), item.get("source_topic_ids", []))
+        target["source_urls"] = _unique(
+            [str(url) for url in target.get("source_urls", []) + item.get("source_urls", []) if str(url).strip()]
+        )
+        target["evidence_count"] += int(item.get("evidence_count", 0) or 0)
+        target["positive_count"] += int(item.get("positive_count", 0) or 0)
+        target["negative_count"] += int(item.get("negative_count", 0) or 0)
+        target["score"] = target["evidence_count"] + target["positive_count"] - target["negative_count"]
+    return list(merged.values())
+
+
+def _merge_int_lists(first: list[Any], second: list[Any]) -> list[int]:
+    values = []
+    for value in first + second:
+        parsed = _safe_int(value)
+        if parsed is not None:
+            values.append(parsed)
+    return sorted(set(values))
+
+
+def _field_as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
 
 
 def _mentions_skill(reading: dict[str, Any], skill_name: str) -> bool:
@@ -286,6 +618,49 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_frontier(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def merge_discovery_into_frontier(path: Path, discovery: dict[str, list[dict[str, Any]]]) -> None:
+    frontier = load_frontier(path)
+    if not frontier:
+        frontier = {"queues": {name: [] for name in PRIMARY_QUEUE_NAMES}, "discovery_queues": {}, "quotas": dict(DEFAULT_QUEUE_QUOTAS)}
+    discovery_queues = frontier.setdefault("discovery_queues", {})
+    for name in DISCOVERY_QUEUE_NAMES:
+        existing = discovery_queues.get(name, [])
+        incoming = discovery.get(name, [])
+        combined = existing + incoming
+        if name == "author-tracking":
+            discovery_queues[name] = _merge_author_discovery(combined)
+        elif name == "tool-lookup":
+            discovery_queues[name] = _merge_tool_discovery(combined)
+        else:
+            discovery_queues[name] = _dedupe_discovery_items(combined)
+    write_json(path, frontier)
+
+
+def preserve_discovery_queues(frontier: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    previous_discovery = previous.get("discovery_queues", {}) if isinstance(previous, dict) else {}
+    if not isinstance(previous_discovery, dict):
+        return frontier
+    current_discovery = frontier.get("discovery_queues", {})
+    merged = {name: current_discovery.get(name, []) for name in DISCOVERY_QUEUE_NAMES}
+    for name in DISCOVERY_QUEUE_NAMES:
+        combined = previous_discovery.get(name, []) + merged.get(name, [])
+        if name == "author-tracking":
+            merged[name] = _merge_author_discovery(combined)
+        elif name == "tool-lookup":
+            merged[name] = _merge_tool_discovery(combined)
+        else:
+            merged[name] = _dedupe_discovery_items(combined)
+    frontier["discovery_queues"] = merged
+    return frontier
+
+
 def run_plan(args: argparse.Namespace) -> int:
     _validate_positive("max-topics", args.max_topics)
     _validate_positive("max-replies", args.max_replies)
@@ -316,6 +691,42 @@ def run_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_goal_plan(args: argparse.Namespace) -> int:
+    _validate_positive("max-topics", args.max_topics)
+    _validate_positive("max-replies", args.max_replies)
+    _validate_positive("max-candidates", args.max_candidates)
+    state = load_state(args.state)
+    topics = load_topics(args.topics)
+    skill_names = _split_cli_values(args.skills)
+    if args.mode == "skill-feedback" and not skill_names:
+        raise SystemExit(2)
+    previous_frontier = load_frontier(args.queue)
+    frontier = build_frontier_queue(
+        topics,
+        mode=args.mode,
+        query=args.query,
+        skill_names=skill_names,
+        read_ids=set(state["read_topic_ids"]),
+        max_candidates=args.max_candidates,
+    )
+    frontier = preserve_discovery_queues(frontier, previous_frontier)
+    next_batch = select_next_batch(frontier, args.max_topics)
+    task = build_goal_task(
+        args.mode,
+        args.query,
+        args.queue,
+        args.state,
+        args.output,
+        next_batch,
+        args.max_topics,
+        args.max_replies,
+    )
+    write_json(args.queue, frontier)
+    write_json(args.output / f"goal_task_{args.mode}.json", task)
+    save_state(args.state, state)
+    return 0
+
+
 def run_evidence(args: argparse.Namespace) -> int:
     skill_names = _split_cli_values(args.skills)
     readings = load_readings(args.readings)
@@ -340,6 +751,31 @@ def run_result(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_session(args: argparse.Namespace) -> int:
+    task = json.loads(args.task.read_text(encoding="utf-8"))
+    readings = _filter_readings_to_task(load_readings(args.readings), task)
+    session = build_session_record(task, readings, args.stop_reason)
+    mode = validate_mode(session["mode"])
+    write_json(_next_session_path(args.output, mode), session)
+    state = load_state(args.state)
+    state["read_topic_ids"] = state["read_topic_ids"] + session["read_topic_ids"]
+    save_state(args.state, state)
+    frontier_path = str(task.get("frontier_queue", "")).strip()
+    if frontier_path:
+        merge_discovery_into_frontier(Path(frontier_path), session["discovery_queues"])
+    return 0
+
+
+def _next_session_path(output: Path, mode: str) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    path = output / f"session_{mode}_{stamp}.json"
+    suffix = 1
+    while path.exists():
+        path = output / f"session_{mode}_{stamp}_{suffix}.json"
+        suffix += 1
+    return path
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Linux.do 任务型冲浪工具。")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -356,6 +792,19 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--max-replies", type=int, default=8)
     plan.set_defaults(func=run_plan)
 
+    goal_plan = subparsers.add_parser("goal-plan", help="生成 Mac /goal 持续冲浪任务包。")
+    goal_plan.add_argument("--mode", required=True, choices=sorted(MODES))
+    goal_plan.add_argument("--query", default="")
+    goal_plan.add_argument("--skills", nargs="*", default=[])
+    goal_plan.add_argument("--topics", type=Path, default=Path("output/linuxdo_skill_research/topic_details_top220.json"))
+    goal_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    goal_plan.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    goal_plan.add_argument("--queue", type=Path, default=Path("state/linuxdo_frontier_queue.json"))
+    goal_plan.add_argument("--max-candidates", type=int, default=80)
+    goal_plan.add_argument("--max-topics", type=int, default=12)
+    goal_plan.add_argument("--max-replies", type=int, default=8)
+    goal_plan.set_defaults(func=run_goal_plan)
+
     evidence = subparsers.add_parser("evidence", help="从阅读结果生成 skill 管理证据包。")
     evidence.add_argument("--skills", nargs="+", required=True)
     evidence.add_argument("--readings", type=Path, required=True)
@@ -369,6 +818,14 @@ def build_parser() -> argparse.ArgumentParser:
     result.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
     result.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
     result.set_defaults(func=run_result)
+
+    session = subparsers.add_parser("session", help="保存 /goal 长任务阅读会话，并更新发现队列和已读状态。")
+    session.add_argument("--task", type=Path, required=True)
+    session.add_argument("--readings", type=Path, required=True)
+    session.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    session.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    session.add_argument("--stop-reason", required=True)
+    session.set_defaults(func=run_session)
 
     return parser
 
@@ -434,15 +891,31 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _coerce_datetime(value: str | datetime | None) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _topic_datetime(topic: dict[str, Any], field: str) -> datetime | None:
+    return _coerce_datetime(topic.get(field))
+
+
 def _validate_positive(name: str, value: int) -> None:
     if value <= 0:
         raise SystemExit(2)
 
 
 def _filter_readings_to_task(readings: list[dict[str, Any]], task: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = task.get("candidates") or task.get("next_batch") or []
     candidate_ids = {
         parsed
-        for parsed in (_safe_int(item.get("id")) for item in task.get("candidates", []) if isinstance(item, dict))
+        for parsed in (_safe_int(item.get("id")) for item in candidates if isinstance(item, dict))
         if parsed is not None
     }
     if not candidate_ids:
