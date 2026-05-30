@@ -21,6 +21,16 @@ class LinuxdoSurfTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "未知模式"):
             linuxdo_surf.validate_mode("daily")
 
+    def test_validate_channel_accepts_supported_channels(self):
+        self.assertEqual(linuxdo_surf.validate_channel("codex-browser"), "codex-browser")
+        self.assertEqual(linuxdo_surf.validate_channel("user-chrome"), "user-chrome")
+        self.assertEqual(linuxdo_surf.validate_channel("mac-goal"), "mac-goal")
+        self.assertEqual(linuxdo_surf.validate_channel("computer-use"), "computer-use")
+
+    def test_validate_channel_rejects_unknown_channel(self):
+        with self.assertRaisesRegex(ValueError, "未知操控通道"):
+            linuxdo_surf.validate_channel("daily")
+
     def test_rank_topics_prefers_query_matches_and_skips_read_ids(self):
         topics = [
             {"id": 1, "title": "普通闲聊", "first_text": "没有重点", "like_count": 50, "reply_count": 20, "views": 1000},
@@ -79,6 +89,34 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(task["budget"], {"max_topics": 3, "max_replies_per_topic": 5})
         self.assertEqual(task["candidates"][0]["id"], 2)
         self.assertIn("Codex 内置浏览器", task["instructions"])
+
+    def test_build_browser_task_defaults_to_codex_browser_channel(self):
+        task = linuxdo_surf.build_browser_task(
+            mode="research",
+            query="Codex 工作流",
+            candidates=[],
+            skill_names=[],
+            max_topics=3,
+            max_replies=5,
+        )
+
+        self.assertEqual(task["control_channel"], "codex-browser")
+        self.assertIn("Codex 内置浏览器", task["instructions"])
+
+    def test_build_browser_task_adds_user_chrome_channel_instructions(self):
+        task = linuxdo_surf.build_browser_task(
+            mode="research",
+            query="Codex 工作流",
+            candidates=[],
+            skill_names=[],
+            max_topics=3,
+            max_replies=5,
+            control_channel="user-chrome",
+        )
+
+        self.assertEqual(task["control_channel"], "user-chrome")
+        self.assertIn("Chrome", task["instructions"])
+        self.assertIn("标签组", task["instructions"])
 
     def test_build_mode_result_marks_read_topics_and_keeps_action_items(self):
         task = {
@@ -209,6 +247,43 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(task["candidates"][0]["id"], 2)
         self.assertTrue(state_exists)
+
+    def test_cli_plan_writes_control_channel(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            topics_path = tmp_path / "topics.json"
+            topics_path.write_text(json.dumps({"topics": []}), encoding="utf-8")
+            out_dir = tmp_path / "out"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "plan",
+                    "--mode",
+                    "research",
+                    "--channel",
+                    "user-chrome",
+                    "--topics",
+                    str(topics_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(tmp_path / "state.json"),
+                ]
+            )
+
+            task = json.loads((out_dir / "browser_task_research.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(task["control_channel"], "user-chrome")
+
+    def test_cli_plan_rejects_unknown_channel(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            topics_path = tmp_path / "topics.json"
+            topics_path.write_text(json.dumps({"topics": []}), encoding="utf-8")
+
+            with self.assertRaises(SystemExit) as context:
+                linuxdo_surf.main(["plan", "--mode", "research", "--channel", "bad", "--topics", str(topics_path)])
+
+        self.assertEqual(context.exception.code, 2)
 
     def test_cli_evidence_writes_skill_evidence_package(self):
         with TemporaryDirectoryPath() as tmp_path:
