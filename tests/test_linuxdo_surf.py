@@ -355,6 +355,18 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(discovery["github-search"][0]["query"], "workflow-kit")
         self.assertEqual(discovery["github-search"][0]["source_tool"], "workflow-kit")
 
+    def test_github_repo_extraction_ignores_bare_paths_with_extra_segments(self):
+        repos = linuxdo_surf._github_repos_from_values(
+            [
+                "openai/codex",
+                "not/repo/path",
+                "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
+                "https://linux.do/t/topic/11",
+            ]
+        )
+
+        self.assertEqual(repos, ["openai/codex", "modelcontextprotocol/servers"])
+
     def test_cli_plan_writes_browser_task_and_state(self):
         with TemporaryDirectoryPath() as tmp_path:
             topics_path = tmp_path / "topics.json"
@@ -714,6 +726,59 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(state["reviewed_github_repos"], ["openai/codex"])
         self.assertEqual(frontier["discovery_queues"]["github-repo-research"][0]["repo"], "openai/openai-python")
         self.assertEqual(frontier["discovery_queues"]["github-search"][0]["query"], "openai-python")
+
+    def test_cli_github_result_filters_to_task_repos_and_search_queries(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            task_path = tmp_path / "github_task_discover.json"
+            task_path.write_text(
+                json.dumps(
+                    {
+                        "mode": "discover",
+                        "query": "workflow",
+                        "next_batch": {
+                            "repositories": [{"repo": "openai/codex"}],
+                            "searches": [{"query": "workflow-kit"}],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            readings_path = tmp_path / "github_readings.json"
+            readings_path.write_text(
+                json.dumps(
+                    {
+                        "github_readings": [
+                            {"repo": "openai/codex", "summary": "任务内仓库"},
+                            {"repo": "anthropic/claude-code", "summary": "混入的非任务仓库"},
+                            {"repo": "acme/workflow-kit", "source_query": "workflow-kit", "summary": "任务内搜索结果"},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "github-result",
+                    "--task",
+                    str(task_path),
+                    "--readings",
+                    str(readings_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(tmp_path / "state.json"),
+                ]
+            )
+
+            result = json.loads((out_dir / "github_result_discover.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["reviewed_github_repos"], ["openai/codex", "acme/workflow-kit"])
+        self.assertEqual(result["items"][1]["source_query"], "workflow-kit")
 
     def test_cli_plan_rejects_unknown_channel(self):
         with TemporaryDirectoryPath() as tmp_path:

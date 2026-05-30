@@ -55,18 +55,18 @@
 - Create: `references/github-research.md`
 - Test: `tests/test_skill_package.py`
 
-- [ ] Document GitHub as an evidence and extension source.
-- [ ] Document `github-plan` and `github-result`.
-- [ ] Add package tests proving the skill references GitHub research rules.
-- [ ] Run full tests and verify they pass.
+- [x] Document GitHub as an evidence and extension source.
+- [x] Document `github-plan` and `github-result`.
+- [x] Add package tests proving the skill references GitHub research rules.
+- [x] Run full tests and verify they pass.
 
 ### Task 5: Release and Convergence
 
 **Files:**
 - Modify as needed from review findings.
 
-- [ ] Sync the installed global skill directory.
-- [ ] Commit and push a functional checkpoint.
+- [x] Sync the installed global skill directory.
+- [x] Commit and push a functional checkpoint.
 - [ ] Run five consecutive verification/check rounds.
-- [ ] Fix any actionable issue found during those rounds.
+- [x] Fix any actionable issue found during those rounds.
 - [ ] Commit and push the final version.

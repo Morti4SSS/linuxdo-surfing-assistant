@@ -446,14 +446,33 @@ def build_github_task(
 
 def build_github_result(task: dict[str, Any], github_readings: list[dict[str, Any]]) -> dict[str, Any]:
     items = []
+    allowed_repos = {
+        repo
+        for repo in (
+            _normalize_repo_name(item.get("repo") or item.get("url"))
+            for item in (task.get("next_batch", {}) or {}).get("repositories", [])
+            if isinstance(item, dict)
+        )
+        if repo
+    }
+    allowed_searches = {
+        str(item.get("query", "")).strip().lower()
+        for item in (task.get("next_batch", {}) or {}).get("searches", [])
+        if isinstance(item, dict) and str(item.get("query", "")).strip()
+    }
     for reading in github_readings:
         repo = _normalize_repo_name(reading.get("repo") or reading.get("url"))
         if not repo:
             continue
+        source_query = str(reading.get("source_query", "")).strip()
+        if allowed_repos or allowed_searches:
+            if repo not in allowed_repos and source_query.lower() not in allowed_searches:
+                continue
         items.append(
             {
                 "repo": repo,
                 "url": reading.get("url") or f"https://github.com/{repo}",
+                "source_query": source_query,
                 "summary": reading.get("summary", ""),
                 "stars": _safe_int(reading.get("stars")) or 0,
                 "last_commit_at": reading.get("last_commit_at", ""),
@@ -665,7 +684,7 @@ def _github_repos_from_values(values: Any) -> list[str]:
         for owner, repo in re.findall(r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", text):
             repos.append(f"{owner}/{repo}")
         without_urls = re.sub(r"https?://\S+", " ", text)
-        for candidate in re.findall(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-])", without_urls):
+        for candidate in re.findall(r"(?<![A-Za-z0-9_.-/])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-/])", without_urls):
             if not candidate.lower().startswith(("http/", "https/")):
                 repos.append(candidate)
     return _normalize_repo_list(repos)
