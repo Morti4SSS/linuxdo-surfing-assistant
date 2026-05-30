@@ -67,6 +67,6 @@
 
 - [x] Sync the installed global skill directory.
 - [x] Commit and push a functional checkpoint.
-- [ ] Run five consecutive verification/check rounds.
+- [x] Run five consecutive verification/check rounds.
 - [x] Fix any actionable issue found during those rounds.
-- [ ] Commit and push the final version.
+- [x] Commit and push the final version.
