@@ -20,6 +20,9 @@ class LinuxdoSurfingSkillPackageTests(unittest.TestCase):
         self.assertIn("/goal", text)
         self.assertIn("持续迭代", text)
         self.assertIn("延展冲浪", text)
+        self.assertIn("切换热度排序", text)
+        self.assertIn("切换最新排序", text)
+        self.assertIn("同义词", text)
         self.assertIn("tools/linuxdo_surf.py", text)
         self.assertIn("状态脚本", text)
         self.assertIn("不是主体", text)
@@ -30,6 +33,7 @@ class LinuxdoSurfingSkillPackageTests(unittest.TestCase):
             "references/continuous-loop.md",
             "references/surfing-modes.md",
             "references/skill-evidence.md",
+            "references/linuxdo-reading-playbook.md",
         ]
 
         for relative_path in expected:

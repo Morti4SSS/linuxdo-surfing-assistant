@@ -34,6 +34,8 @@ Reading is browser-first. Linux.do requires login state, so use Codex 内置浏�
 7. Save the batch with `scripts/linuxdo_surf.py session` so read state and discovery queues are preserved.
 8. If the output should feed the skill-management project, create a skill evidence package. See `references/skill-evidence.md`.
 
+For self-selected posts or lightweight goldmine searches, read only the requested number of posts and stop with a compact result. Do not invent a next-batch loop unless the user invokes `/goal`, asks to continue until a target, or explicitly requests sustained surfing.
+
 ## Continuous `/goal` Behavior
 
 When invoked through `/goal` or asked to keep surfing, do not treat the task as a single summary pass. Run a loop:
@@ -46,6 +48,8 @@ When invoked through `/goal` or asked to keep surfing, do not treat the task as 
 - continue from the updated frontier until a stop condition is met.
 
 Default stop conditions: read budget reached, time budget reached, next batch is empty, high-value discoveries dry up across consecutive batches, or the user-provided target is satisfied. Detailed loop guidance is in `references/continuous-loop.md`.
+
+If a batch has no meaningful harvest, adjust before stopping: 切换热度排序, 切换最新排序, search 同义词, and inspect whether previous posts contain leads worth deeper search. Use `references/linuxdo-reading-playbook.md` for Linux.do-specific reading and adjustment tactics.
 
 ## State Helper
 

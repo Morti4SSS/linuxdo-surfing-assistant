@@ -40,6 +40,8 @@ Stop when one of these is true:
 
 When stopping, explain the stop reason and what remains in the frontier. Do not present a stop as final truth; present it as the end of the current surf pass.
 
+Before stopping for no harvest, run one adjustment pass: 切换热度排序, 切换最新排序, search 同义词, and inspect previous readings for follow-up links, author names, alternate tool names, or unresolved risks. If that still produces no useful leads, save the session with that stop reason.
+
 ## Browser Discipline
 
 Linux.do reading depends on saved login state. If Codex 内置浏览器 is not logged in, ask the user to log in. Do not scrape protected content with unauthenticated HTTP. Do not use computer-use for ordinary post reading.
