@@ -27,11 +27,14 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(linuxdo_surf.validate_channel("codex-browser"), "codex-browser")
         self.assertEqual(linuxdo_surf.validate_channel("user-chrome"), "user-chrome")
         self.assertEqual(linuxdo_surf.validate_channel("mac-goal"), "mac-goal")
-        self.assertEqual(linuxdo_surf.validate_channel("computer-use"), "computer-use")
 
     def test_validate_channel_rejects_unknown_channel(self):
         with self.assertRaisesRegex(ValueError, "未知操控通道"):
             linuxdo_surf.validate_channel("daily")
+
+    def test_validate_channel_rejects_computer_use_for_normal_reading(self):
+        with self.assertRaisesRegex(ValueError, "未知操控通道"):
+            linuxdo_surf.validate_channel("computer-use")
 
     def test_rank_topics_prefers_query_matches_and_skips_read_ids(self):
         topics = [
@@ -177,6 +180,22 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(task["control_channel"], "user-chrome")
         self.assertIn("Chrome", task["instructions"])
         self.assertIn("标签组", task["instructions"])
+
+    def test_build_goal_task_keeps_browser_reading_explicit(self):
+        task = linuxdo_surf.build_goal_task(
+            mode="goldmine",
+            query="",
+            frontier_path=Path("state/linuxdo_frontier_queue.json"),
+            state_path=Path("state/linuxdo_surf_state.json"),
+            output_path=Path("output/linuxdo_surf"),
+            next_batch=[],
+            max_topics=3,
+            max_replies=5,
+        )
+
+        self.assertEqual(task["control_channel"], "mac-goal")
+        self.assertIn("Codex 内置浏览器", task["instructions"])
+        self.assertIn("/goal", task["instructions"])
 
     def test_build_mode_result_marks_read_topics_and_keeps_action_items(self):
         task = {
@@ -445,6 +464,61 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(frontier["discovery_queues"]["author-tracking"][0]["username"], "alice")
         self.assertEqual(frontier["discovery_queues"]["tool-lookup"][0]["name"], "workflow-kit")
+
+    def test_cli_goal_plan_extends_next_batch_from_discovery_queues(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            topics_path = tmp_path / "topics.json"
+            topics_path.write_text(json.dumps({"topics": []}), encoding="utf-8")
+            queue_path = tmp_path / "frontier.json"
+            queue_path.write_text(
+                json.dumps(
+                    {
+                        "queues": {"new": [], "active-old": [], "low-traffic": []},
+                        "discovery_queues": {
+                            "comment-reference": [
+                                {
+                                    "target_url": "https://linux.do/t/topic/30",
+                                    "target_type": "linuxdo-topic",
+                                    "reason": "高价值回复引用",
+                                    "score": 2,
+                                    "depth": 1,
+                                }
+                            ],
+                            "tool-lookup": [],
+                            "author-tracking": [],
+                            "skill-workflow-evidence": [],
+                        },
+                        "quotas": {"new": 0.4, "active-old": 0.4, "low-traffic": 0.2},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "goal-plan",
+                    "--mode",
+                    "goldmine",
+                    "--topics",
+                    str(topics_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(tmp_path / "state.json"),
+                    "--queue",
+                    str(queue_path),
+                    "--max-topics",
+                    "1",
+                ]
+            )
+
+            task = json.loads((out_dir / "goal_task_goldmine.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(task["next_batch"][0]["id"], 30)
+        self.assertEqual(task["next_batch"][0]["queue"], "comment-reference")
 
     def test_cli_plan_rejects_unknown_channel(self):
         with TemporaryDirectoryPath() as tmp_path:
@@ -718,6 +792,8 @@ class LinuxdoSurfTests(unittest.TestCase):
                                 "high_value_replies": [
                                     {"id": 22, "text": "参考 https://linux.do/t/topic/30 和 workflow-kit", "author": "bob"}
                                 ],
+                                "follow_up_links": ["https://linux.do/t/topic/30"],
+                                "confidence": "medium",
                                 "positive_feedback": ["好用"],
                             }
                         ]
@@ -755,6 +831,8 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(item["historical_replies"][0]["id"], 20)
         self.assertEqual(item["recent_replies"][0]["id"], 21)
         self.assertEqual(item["high_value_replies"][0]["id"], 22)
+        self.assertEqual(item["follow_up_links"], ["https://linux.do/t/topic/30"])
+        self.assertEqual(item["confidence"], "medium")
         self.assertEqual(frontier["discovery_queues"]["author-tracking"][0]["username"], "alice")
         self.assertEqual(frontier["discovery_queues"]["comment-reference"][0]["target_type"], "linuxdo-topic")
         self.assertEqual(frontier["discovery_queues"]["comment-reference"][0]["depth"], 1)
@@ -792,6 +870,25 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(tool["evidence_count"], 2)
         self.assertEqual(tool["positive_count"], 1)
         self.assertEqual(tool["negative_count"], 1)
+
+    def test_extract_discovery_items_uses_follow_up_links_and_reply_links(self):
+        readings = [
+            {
+                "id": 10,
+                "url": "https://linux.do/t/topic/10",
+                "follow_up_links": ["https://linux.do/t/topic/31"],
+                "high_value_replies": [
+                    {"id": 22, "links": ["https://linux.do/t/topic/32"], "text": "见另一个帖子"}
+                ],
+            }
+        ]
+
+        discovery = linuxdo_surf.extract_discovery_items(readings)
+
+        self.assertEqual(
+            [item["target_url"] for item in discovery["comment-reference"]],
+            ["https://linux.do/t/topic/31", "https://linux.do/t/topic/32"],
+        )
 
     def test_extract_discovery_items_counts_string_feedback_as_one_item(self):
         readings = [

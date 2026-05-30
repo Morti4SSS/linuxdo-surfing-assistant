@@ -9,7 +9,7 @@ from typing import Any
 
 
 MODES = {"research", "goldmine", "skill-feedback", "discover"}
-CONTROL_CHANNELS = {"codex-browser", "user-chrome", "mac-goal", "computer-use"}
+CONTROL_CHANNELS = {"codex-browser", "user-chrome", "mac-goal"}
 DEFAULT_CONTROL_CHANNEL = "codex-browser"
 PRIMARY_QUEUE_NAMES = ("new", "active-old", "low-traffic")
 DISCOVERY_QUEUE_NAMES = ("author-tracking", "comment-reference", "tool-lookup", "skill-workflow-evidence")
@@ -111,7 +111,46 @@ def select_next_batch(frontier: dict[str, Any], max_topics: int) -> list[dict[st
             seen_ids.add(item_id)
             if len(selected) >= max_topics:
                 return selected
+    return _extend_batch_with_discovery(frontier, selected, seen_ids, max_topics)
+
+
+def _extend_batch_with_discovery(
+    frontier: dict[str, Any],
+    selected: list[dict[str, Any]],
+    seen_ids: set[int],
+    max_topics: int,
+) -> list[dict[str, Any]]:
+    discovery = frontier.get("discovery_queues", {})
+    for item in discovery.get("comment-reference", []):
+        if len(selected) >= max_topics:
+            return selected
+        batch_item = _batch_item_from_comment_reference(item)
+        if not batch_item:
+            continue
+        item_id = _safe_int(batch_item.get("id"))
+        if item_id is None or item_id in seen_ids:
+            continue
+        selected.append(batch_item)
+        seen_ids.add(item_id)
     return selected
+
+
+def _batch_item_from_comment_reference(item: dict[str, Any]) -> dict[str, Any] | None:
+    if item.get("target_type") != "linuxdo-topic":
+        return None
+    target_url = str(item.get("target_url", "")).strip()
+    match = re.search(r"https://linux\.do/t/topic/(\d+)", target_url)
+    if not match:
+        return None
+    topic_id = int(match.group(1))
+    return {
+        "id": topic_id,
+        "title": item.get("title", ""),
+        "url": target_url,
+        "queue": "comment-reference",
+        "surf_score": item.get("score", 0),
+        "reason": item.get("reason", "评论引用扩展"),
+    }
 
 
 def _primary_queue_for_topic(topic: dict[str, Any], now: datetime) -> str:
@@ -292,8 +331,7 @@ def _browser_instructions(mode: str, control_channel: str) -> str:
     channel_notes = {
         "codex-browser": "请使用 Codex 内置浏览器打开候选 Linux.do 帖子。首次需要登录时请让用户完成登录，后续复用已保存登录态。",
         "user-chrome": "请使用用户本机 Chrome 中已经打开或按标签组整理的 Linux.do 帖子，理解标签组和页面之间的关系；不要把这个通道当作全站搜索。",
-        "mac-goal": "这是未来 Mac /goal 长任务通道。执行前必须明确停止标准、预算和阶段汇报，不要在第一版里假装已经能后台持续冲浪。",
-        "computer-use": "这是实验性 computer-use 通道。仅在普通浏览器能力不足时考虑，不用于常规帖子阅读。",
+        "mac-goal": "这是 /goal 长任务执行形态，不是独立阅读通道；仍需使用 Codex 内置浏览器读取 Linux.do。执行前必须明确停止标准、预算和阶段汇报，不要假装能无限后台冲浪。",
     }
     return (
         channel_notes[control_channel]
@@ -304,7 +342,7 @@ def _browser_instructions(mode: str, control_channel: str) -> str:
 
 def _goal_instructions(mode: str) -> str:
     return (
-        "用于 Mac /goal 长任务：按 next_batch 逐帖阅读 Linux.do，保存每帖摘要、关键证据、工具名、作者、"
+        "用于 /goal 长任务：仍必须使用 Codex 内置浏览器按 next_batch 逐帖阅读 Linux.do，保存每帖摘要、关键证据、工具名、作者、"
         "高价值回复和可继续扩展的引用。活跃老帖必须阅读首帖、关键历史回复和近期回复，不要只看最新回复。"
         f"当前模式：{mode}。完成停止条件后调用 session 记录本轮结果。"
     )
@@ -330,6 +368,8 @@ def build_mode_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> d
                 "historical_replies": reading.get("historical_replies", []),
                 "recent_replies": reading.get("recent_replies", []),
                 "high_value_replies": reading.get("high_value_replies", []),
+                "follow_up_links": reading.get("follow_up_links", []),
+                "confidence": reading.get("confidence", ""),
             }
         )
     mode = str(task.get("mode", ""))
@@ -437,24 +477,45 @@ def _add_tool_discovery(discovery: dict[str, list[dict[str, Any]]], reading: dic
 
 def _add_reference_discovery(discovery: dict[str, list[dict[str, Any]]], reading: dict[str, Any]) -> None:
     source_topic_id = _safe_int(reading.get("id")) or 0
+    for target_url in _linuxdo_topic_urls(reading.get("follow_up_links", [])):
+        discovery["comment-reference"].append(_reference_item(target_url, source_topic_id, 0, "", "reading follow_up_links 标记了后续延展帖子"))
     replies = reading.get("high_value_replies", []) or []
     for reply in replies:
         if not isinstance(reply, dict):
             continue
-        text = str(reply.get("text", ""))
-        for target_url in re.findall(r"https://linux\.do/t/topic/\d+", text):
+        urls = _linuxdo_topic_urls([str(reply.get("text", ""))] + _field_as_list(reply.get("links", [])))
+        for target_url in urls:
             discovery["comment-reference"].append(
-                {
-                    "target_url": target_url,
-                    "target_type": "linuxdo-topic",
-                    "source_topic_id": source_topic_id,
-                    "source_reply_id": _safe_int(reply.get("id")) or 0,
-                    "source_author": reply.get("author", ""),
-                    "reason": "高价值回复引用了相关帖子，需要扩展阅读上下文",
-                    "score": 1,
-                    "depth": 1,
-                }
+                _reference_item(
+                    target_url,
+                    source_topic_id,
+                    _safe_int(reply.get("id")) or 0,
+                    reply.get("author", ""),
+                    "高价值回复引用了相关帖子，需要扩展阅读上下文",
+                )
             )
+
+
+def _linuxdo_topic_urls(values: Any) -> list[str]:
+    if isinstance(values, str):
+        values = [values]
+    urls: list[str] = []
+    for value in values:
+        urls.extend(re.findall(r"https://linux\.do/t/topic/\d+", str(value)))
+    return _unique(urls)
+
+
+def _reference_item(target_url: str, source_topic_id: int, source_reply_id: int, source_author: str, reason: str) -> dict[str, Any]:
+    return {
+        "target_url": target_url,
+        "target_type": "linuxdo-topic",
+        "source_topic_id": source_topic_id,
+        "source_reply_id": source_reply_id,
+        "source_author": source_author,
+        "reason": reason,
+        "score": 1,
+        "depth": 1,
+    }
 
 
 def _extract_tool_names(reading: dict[str, Any]) -> list[str]:

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Linux.do Surfing"
+  short_description: "Use Codex browser to surf Linux.do for AI signals"
+  default_prompt: "Use $linuxdo-surfing to find high-value Linux.do discussions about AI tools, skills, and workflows."
+
+policy:
+  allow_implicit_invocation: true
