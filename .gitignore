@@ -1,0 +1,27 @@
+# Runtime outputs and local state
+output/
+state/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Browser profiles, cookies, caches, and other local login state
+**/chrome_profile/
+**/*profile*/
+**/Default/Network/Cookies*
+**/Default/Login Data*
+**/Default/Local Storage/
+**/Default/Session Storage/
+**/Default/Sessions/
+
+# Downloaded or unrelated archives
+*.zip
+
+# Existing unrelated extracted automation bundle
+Gopay_plus_automatic-main/
