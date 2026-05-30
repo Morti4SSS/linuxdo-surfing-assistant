@@ -26,6 +26,14 @@ class LinuxdoSurfingSkillPackageTests(unittest.TestCase):
         self.assertIn("tools/linuxdo_surf.py", text)
         self.assertIn("状态脚本", text)
         self.assertIn("不是主体", text)
+        self.assertIn("one-screen brief", text)
+        self.assertIn("马上试", text)
+        self.assertIn("收藏观察", text)
+        self.assertIn("暂时跳过", text)
+        self.assertIn("decision brief", text)
+        self.assertIn("read-post index", text)
+        self.assertIn("发现状态", text)
+        self.assertIn("展开第 2 个工具的优劣", text)
 
     def test_skill_references_cover_reading_schema_and_continuous_loop(self):
         expected = [
@@ -42,6 +50,26 @@ class LinuxdoSurfingSkillPackageTests(unittest.TestCase):
                 self.assertTrue(path.exists(), f"{relative_path} should exist")
                 text = path.read_text(encoding="utf-8")
                 self.assertGreater(len(re.sub(r"\s+", "", text)), 200)
+
+    def test_references_preserve_absorption_friendly_output_contract(self):
+        reading_schema = (ROOT / "references" / "reading-schema.md").read_text(encoding="utf-8")
+        continuous_loop = (ROOT / "references" / "continuous-loop.md").read_text(encoding="utf-8")
+        surfing_modes = (ROOT / "references" / "surfing-modes.md").read_text(encoding="utf-8")
+
+        for text in [reading_schema, continuous_loop, surfing_modes]:
+            with self.subTest():
+                self.assertIn("3-5", text)
+                self.assertIn("马上试", text)
+                self.assertIn("收藏观察", text)
+                self.assertIn("暂时跳过", text)
+
+        self.assertIn("Chat Compression", reading_schema)
+        self.assertIn("Checkpoint Output", continuous_loop)
+        self.assertIn("Default User-Facing Output", surfing_modes)
+        self.assertIn("session/evidence files", surfing_modes)
+        self.assertIn("每个读过的帖子", reading_schema)
+        self.assertIn("已读帖子索引", continuous_loop)
+        self.assertIn("已读帖子索引", surfing_modes)
 
     def test_openai_yaml_matches_skill_identity(self):
         config_path = ROOT / "agents" / "openai.yaml"

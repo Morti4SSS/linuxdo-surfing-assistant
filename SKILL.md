@@ -65,13 +65,19 @@ The script does not replace reading. It only ranks candidates, stores sessions, 
 
 ## Output Style
 
-Prefer structured, high-signal output:
+Default to an absorption-friendly output. The chat response is for decisions; session and evidence files are for traceability. Do not dump full reading notes, long reply lists, or tens of thousands of words into chat unless the user explicitly asks for a full export.
 
-- what was read;
-- what is genuinely valuable;
-- tool/skill/workflow names with evidence;
-- positive and negative community feedback;
-- next leads worth following;
-- what was saved to session or evidence packages.
+Use this two-layer default shape:
+
+- one-screen brief: 3-5 top findings, each with one sentence explaining why it matters;
+- priority buckets: `马上试`, `收藏观察`, `暂时跳过`;
+- read-post index: include every post read in the pass, with title, link, 发现状态, value tag, one-line summary, and whether it is expandable;
+- evidence index: for valuable posts, include key reply point and confidence instead of full post narration;
+- next leads worth following, only when they are clearly connected to the user's goal;
+- saved artifacts: mention session or evidence package paths when they were created.
+
+The 3-5 limit applies only to the top-findings brief, not to the read-post index. If a pass reads many posts, list every post read so the user can see what was covered and where value was or was not found.
+
+For `/goal` or sustained surfing, report compact checkpoints after each batch and keep detailed reading records in files. The final answer should be a decision brief plus a complete read-post index, not a transcript. If the user wants more, invite expansion by item number, for example "展开第 2 个工具的优劣".
 
 Avoid fixed daily reports unless the user explicitly asks for one.

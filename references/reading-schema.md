@@ -1,6 +1,6 @@
 # Reading Schema
 
-Use this schema when recording Linux.do posts read by Codex. The goal is not beautiful prose; the goal is reusable evidence that can drive the next surfing batch and feed skill management.
+Use this schema when recording Linux.do posts read by Codex. The goal is not beautiful prose; the goal is reusable evidence that can drive the next surfing batch and feed skill management. Detailed notes belong in this structured record; the chat response should stay compact and decision-oriented.
 
 ## Required Fields
 
@@ -65,3 +65,16 @@ Put links worth extending into `follow_up_links`. Do not include every URL; incl
 Separate positive feedback, negative feedback, and risk notes. A tool being popular is not enough; record why people like it, where it fails, and what it conflicts with. If the thread is mostly noise, record a short summary and set action items empty.
 
 When reading from a user-curated Chrome tab group, preserve the relationship between tabs in the summary, for example "comparison set", "same tool", "opposing view", or "follow-up reference".
+
+## Chat Compression
+
+When turning readings into a user-facing answer, compress rather than replay:
+
+- surface the top 3-5 findings by adoption value, risk, or novelty as a brief;
+- put each finding into `马上试`, `收藏观察`, or `暂时跳过`;
+- include every post read in a read-post index with title, URL, 发现状态, value tag, one-line summary, and expandable detail marker;
+- cite key reply points and confidence for posts that contain real findings;
+- keep full `first_post`, `historical_replies`, `recent_replies`, and `high_value_replies` in the saved reading record;
+- expand a specific item only when the user asks for that item.
+
+每个读过的帖子都 should appear in the user-facing index, even when it had no useful discovery. Mark low-value or noisy posts clearly instead of hiding them.

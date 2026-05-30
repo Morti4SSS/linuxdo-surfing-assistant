@@ -23,3 +23,14 @@ Use when the user wants better skills, plugins, CLI tools, workflows, or ways of
 - `mac-goal`: execution shape for `/goal` continuous loops. It still reads through Codex 内置浏览器 and saved Linux.do login state.
 
 The mode controls what to look for. The channel controls where the reading starts.
+
+## Default User-Facing Output
+
+All modes should optimize for absorption, not volume. Put the full trace in session/evidence files and keep chat to a decision brief plus a complete 已读帖子索引:
+
+- top 3-5 findings as the short conclusion layer;
+- `马上试`, `收藏观察`, `暂时跳过`;
+- every read post with title, link, 发现状态, value tag, and one-line summary;
+- evidence links, key reply points, and confidence for posts with real findings;
+- one-line reason for each recommendation;
+- optional "可展开项" list when deeper detail exists.
