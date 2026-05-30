@@ -12,7 +12,14 @@ MODES = {"research", "goldmine", "skill-feedback", "discover"}
 CONTROL_CHANNELS = {"codex-browser", "user-chrome", "mac-goal"}
 DEFAULT_CONTROL_CHANNEL = "codex-browser"
 PRIMARY_QUEUE_NAMES = ("new", "active-old", "low-traffic")
-DISCOVERY_QUEUE_NAMES = ("author-tracking", "comment-reference", "tool-lookup", "skill-workflow-evidence")
+DISCOVERY_QUEUE_NAMES = (
+    "author-tracking",
+    "comment-reference",
+    "tool-lookup",
+    "skill-workflow-evidence",
+    "github-repo-research",
+    "github-search",
+)
 DEFAULT_QUEUE_QUOTAS = {"new": 0.4, "active-old": 0.4, "low-traffic": 0.2}
 DEFAULT_KEYWORDS = {
     "goldmine": ["ai coding", "codex", "claude code", "skill", "mcp", "workflow", "工作流", "插件", "开源", "经验"],
@@ -244,7 +251,12 @@ def _unique(values: list[str]) -> list[str]:
     return result
 
 
-DEFAULT_STATE = {"read_topic_ids": [], "synced_skill_names": []}
+DEFAULT_STATE = {
+    "read_topic_ids": [],
+    "synced_skill_names": [],
+    "reviewed_github_repos": [],
+    "reviewed_github_searches": [],
+}
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -324,7 +336,16 @@ def build_goal_task(
 def _normalize_state(state: dict[str, Any]) -> dict[str, Any]:
     read_ids = sorted({int(item) for item in state.get("read_topic_ids", []) if str(item).strip().isdigit()})
     synced_names = _unique([str(item).strip() for item in state.get("synced_skill_names", []) if str(item).strip()])
-    return {"read_topic_ids": read_ids, "synced_skill_names": synced_names}
+    reviewed_repos = _normalize_repo_list(state.get("reviewed_github_repos", []))
+    reviewed_searches = _unique(
+        [str(item).strip().lower() for item in state.get("reviewed_github_searches", []) if str(item).strip()]
+    )
+    return {
+        "read_topic_ids": read_ids,
+        "synced_skill_names": synced_names,
+        "reviewed_github_repos": reviewed_repos,
+        "reviewed_github_searches": reviewed_searches,
+    }
 
 
 def _browser_instructions(mode: str, control_channel: str) -> str:
@@ -398,6 +419,69 @@ def build_session_record(task: dict[str, Any], readings: list[dict[str, Any]], s
     }
 
 
+def build_github_task(
+    mode: str,
+    query: str,
+    frontier_path: Path,
+    next_repos: list[dict[str, Any]],
+    next_searches: list[dict[str, Any]],
+    max_repos: int,
+    max_searches: int,
+) -> dict[str, Any]:
+    mode = validate_mode(mode)
+    return {
+        "mode": mode,
+        "control_channel": "github-mcp",
+        "query": query,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "frontier_queue": str(frontier_path),
+        "budget": {"max_repos": max_repos, "max_searches": max_searches},
+        "instructions": _github_instructions(mode),
+        "next_batch": {
+            "repositories": next_repos[:max_repos],
+            "searches": next_searches[:max_searches],
+        },
+    }
+
+
+def build_github_result(task: dict[str, Any], github_readings: list[dict[str, Any]]) -> dict[str, Any]:
+    items = []
+    for reading in github_readings:
+        repo = _normalize_repo_name(reading.get("repo") or reading.get("url"))
+        if not repo:
+            continue
+        items.append(
+            {
+                "repo": repo,
+                "url": reading.get("url") or f"https://github.com/{repo}",
+                "summary": reading.get("summary", ""),
+                "stars": _safe_int(reading.get("stars")) or 0,
+                "last_commit_at": reading.get("last_commit_at", ""),
+                "positive_signals": _field_as_list(reading.get("positive_signals", [])),
+                "negative_signals": _field_as_list(reading.get("negative_signals", [])),
+                "risk_notes": _field_as_list(reading.get("risk_notes", [])),
+                "related_repos": _field_as_list(reading.get("related_repos", [])),
+                "related_tools": _field_as_list(reading.get("related_tools", [])),
+                "recommendation": reading.get("recommendation", ""),
+                "confidence": reading.get("confidence", ""),
+            }
+        )
+    reviewed_searches = [
+        str(item.get("query", "")).strip().lower()
+        for item in (task.get("next_batch", {}) or {}).get("searches", [])
+        if str(item.get("query", "")).strip()
+    ]
+    return {
+        "mode": task.get("mode", ""),
+        "query": task.get("query", ""),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "reviewed_github_repos": [item["repo"] for item in items],
+        "reviewed_github_searches": _unique(reviewed_searches),
+        "items": items,
+        "discovery_queues": extract_github_discovery_items(items),
+    }
+
+
 def build_skill_evidence_package(skill_names: list[str], readings: list[dict[str, Any]]) -> dict[str, Any]:
     evidence = []
     for skill_name in skill_names:
@@ -425,11 +509,51 @@ def extract_discovery_items(readings: list[dict[str, Any]]) -> dict[str, list[di
         _add_author_discovery(discovery, reading)
         _add_tool_discovery(discovery, reading)
         _add_reference_discovery(discovery, reading)
+        _add_github_discovery(discovery, reading)
     return {
         "author-tracking": _merge_author_discovery(discovery["author-tracking"]),
         "comment-reference": _dedupe_discovery_items(discovery["comment-reference"]),
         "tool-lookup": _merge_tool_discovery(discovery["tool-lookup"]),
         "skill-workflow-evidence": _dedupe_discovery_items(discovery["skill-workflow-evidence"]),
+        "github-repo-research": _merge_github_repo_discovery(discovery["github-repo-research"]),
+        "github-search": _merge_github_search_discovery(discovery["github-search"]),
+    }
+
+
+def extract_github_discovery_items(github_readings: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    discovery = {name: [] for name in DISCOVERY_QUEUE_NAMES}
+    for reading in github_readings:
+        source_repo = _normalize_repo_name(reading.get("repo") or reading.get("url"))
+        for repo in _github_repos_from_values(reading.get("related_repos", [])):
+            discovery["github-repo-research"].append(
+                _github_repo_item(
+                    repo,
+                    source_topic_id=0,
+                    source_url=str(reading.get("url", "")),
+                    source_repo=source_repo,
+                    focus="GitHub 研究结果提到的相关仓库，需要继续确认维护状态、README、issues 和替代方案",
+                    score=1,
+                )
+            )
+        for tool in _field_as_list(reading.get("related_tools", [])):
+            query = str(tool).strip()
+            if query:
+                discovery["github-search"].append(
+                    _github_search_item(
+                        query,
+                        source_tool=query,
+                        source_topic_id=0,
+                        source_url=str(reading.get("url", "")),
+                        score=1,
+                    )
+                )
+    return {
+        "author-tracking": [],
+        "comment-reference": [],
+        "tool-lookup": [],
+        "skill-workflow-evidence": [],
+        "github-repo-research": _merge_github_repo_discovery(discovery["github-repo-research"]),
+        "github-search": _merge_github_search_discovery(discovery["github-search"]),
     }
 
 
@@ -496,6 +620,30 @@ def _add_reference_discovery(discovery: dict[str, list[dict[str, Any]]], reading
             )
 
 
+def _add_github_discovery(discovery: dict[str, list[dict[str, Any]]], reading: dict[str, Any]) -> None:
+    topic_id = _safe_int(reading.get("id")) or 0
+    source_url = str(reading.get("url", "")).strip()
+    focus = _github_focus_from_reading(reading)
+    values: list[Any] = [
+        reading.get("url", ""),
+        reading.get("summary", ""),
+        reading.get("first_post", ""),
+        reading.get("follow_up_links", []),
+        reading.get("tools", []),
+    ]
+    for reply in reading.get("high_value_replies", []) or []:
+        if isinstance(reply, dict):
+            values.extend([reply.get("text", ""), reply.get("links", []), reply.get("tools", [])])
+    for repo in _github_repos_from_values(values):
+        discovery["github-repo-research"].append(
+            _github_repo_item(repo, topic_id, source_url, "", focus, score=2)
+        )
+    for tool in _extract_tool_names(reading):
+        discovery["github-search"].append(
+            _github_search_item(tool, source_tool=tool, source_topic_id=topic_id, source_url=source_url, score=1)
+        )
+
+
 def _linuxdo_topic_urls(values: Any) -> list[str]:
     if isinstance(values, str):
         values = [values]
@@ -503,6 +651,90 @@ def _linuxdo_topic_urls(values: Any) -> list[str]:
     for value in values:
         urls.extend(re.findall(r"https://linux\.do/t/topic/\d+", str(value)))
     return _unique(urls)
+
+
+def _github_repos_from_values(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        values = [values]
+    repos: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            repos.extend(_github_repos_from_values(value))
+            continue
+        text = str(value)
+        for owner, repo in re.findall(r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", text):
+            repos.append(f"{owner}/{repo}")
+        without_urls = re.sub(r"https?://\S+", " ", text)
+        for candidate in re.findall(r"(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-])", without_urls):
+            if not candidate.lower().startswith(("http/", "https/")):
+                repos.append(candidate)
+    return _normalize_repo_list(repos)
+
+
+def _normalize_repo_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        values = [values]
+    repos = []
+    for value in values:
+        repo = _normalize_repo_name(value)
+        if repo:
+            repos.append(repo)
+    return _unique(repos)
+
+
+def _normalize_repo_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", text)
+    if match:
+        text = f"{match.group(1)}/{match.group(2)}"
+    text = text.strip().strip("/")
+    parts = text.split("/")
+    if len(parts) < 2:
+        return ""
+    owner, repo = parts[0], parts[1]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+        return ""
+    return f"{owner.lower()}/{repo.lower()}"
+
+
+def _github_repo_item(
+    repo: str,
+    source_topic_id: int,
+    source_url: str,
+    source_repo: str,
+    focus: str,
+    score: int,
+) -> dict[str, Any]:
+    return {
+        "repo": repo,
+        "url": f"https://github.com/{repo}",
+        "source_topic_ids": [source_topic_id] if source_topic_id else [],
+        "source_urls": [source_url] if source_url else [],
+        "source_repos": [source_repo] if source_repo else [],
+        "focus": focus,
+        "score": score,
+        "depth": 1,
+    }
+
+
+def _github_search_item(query: str, source_tool: str, source_topic_id: int, source_url: str, score: int) -> dict[str, Any]:
+    return {
+        "query": query,
+        "source_tool": source_tool,
+        "source_topic_ids": [source_topic_id] if source_topic_id else [],
+        "source_urls": [source_url] if source_url else [],
+        "score": score,
+        "depth": 1,
+    }
+
+
+def _github_focus_from_reading(reading: dict[str, Any]) -> str:
+    signals = _field_as_list(reading.get("positive_feedback", [])) + _field_as_list(reading.get("risk_notes", []))
+    if signals:
+        return "；".join(str(item) for item in signals if str(item).strip())
+    return "确认 README、最近提交、issue 活跃度、安装成本、替代方案和是否值得试用"
 
 
 def _reference_item(target_url: str, source_topic_id: int, source_reply_id: int, source_author: str, reason: str) -> dict[str, Any]:
@@ -598,6 +830,59 @@ def _merge_tool_discovery(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(merged.values())
 
 
+def _merge_github_repo_discovery(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in items:
+        repo = _normalize_repo_name(item.get("repo") or item.get("url"))
+        if not repo:
+            continue
+        if repo not in merged:
+            merged[repo] = {
+                **item,
+                "repo": repo,
+                "url": f"https://github.com/{repo}",
+                "source_topic_ids": [],
+                "source_urls": [],
+                "source_repos": [],
+                "score": 0,
+            }
+        target = merged[repo]
+        target["source_topic_ids"] = _merge_int_lists(target.get("source_topic_ids", []), item.get("source_topic_ids", []))
+        target["source_urls"] = _unique(
+            [str(url) for url in target.get("source_urls", []) + item.get("source_urls", []) if str(url).strip()]
+        )
+        target["source_repos"] = _normalize_repo_list(target.get("source_repos", []) + item.get("source_repos", []))
+        focus = str(item.get("focus", "")).strip()
+        if focus and focus not in str(target.get("focus", "")):
+            target["focus"] = (str(target.get("focus", "")).strip() + "；" + focus).strip("；")
+        target["score"] += int(item.get("score", 0) or 0)
+    return list(merged.values())
+
+
+def _merge_github_search_discovery(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in items:
+        query = str(item.get("query", "")).strip()
+        if not query:
+            continue
+        key = query.lower()
+        if key not in merged:
+            merged[key] = {
+                **item,
+                "query": query,
+                "source_topic_ids": [],
+                "source_urls": [],
+                "score": 0,
+            }
+        target = merged[key]
+        target["source_topic_ids"] = _merge_int_lists(target.get("source_topic_ids", []), item.get("source_topic_ids", []))
+        target["source_urls"] = _unique(
+            [str(url) for url in target.get("source_urls", []) + item.get("source_urls", []) if str(url).strip()]
+        )
+        target["score"] += int(item.get("score", 0) or 0)
+    return list(merged.values())
+
+
 def _merge_int_lists(first: list[Any], second: list[Any]) -> list[int]:
     values = []
     for value in first + second:
@@ -669,7 +954,7 @@ def load_readings(path: Path) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        readings = data.get("readings") or data.get("topics") or []
+        readings = data.get("readings") or data.get("github_readings") or data.get("topics") or []
         return readings if isinstance(readings, list) else []
     return []
 
@@ -699,6 +984,10 @@ def merge_discovery_into_frontier(path: Path, discovery: dict[str, list[dict[str
             discovery_queues[name] = _merge_author_discovery(combined)
         elif name == "tool-lookup":
             discovery_queues[name] = _merge_tool_discovery(combined)
+        elif name == "github-repo-research":
+            discovery_queues[name] = _merge_github_repo_discovery(combined)
+        elif name == "github-search":
+            discovery_queues[name] = _merge_github_search_discovery(combined)
         else:
             discovery_queues[name] = _dedupe_discovery_items(combined)
     write_json(path, frontier)
@@ -716,10 +1005,50 @@ def preserve_discovery_queues(frontier: dict[str, Any], previous: dict[str, Any]
             merged[name] = _merge_author_discovery(combined)
         elif name == "tool-lookup":
             merged[name] = _merge_tool_discovery(combined)
+        elif name == "github-repo-research":
+            merged[name] = _merge_github_repo_discovery(combined)
+        elif name == "github-search":
+            merged[name] = _merge_github_search_discovery(combined)
         else:
             merged[name] = _dedupe_discovery_items(combined)
     frontier["discovery_queues"] = merged
     return frontier
+
+
+def select_github_research_batch(
+    frontier: dict[str, Any],
+    state: dict[str, Any],
+    max_repos: int,
+    max_searches: int,
+) -> dict[str, list[dict[str, Any]]]:
+    _validate_positive("max-repos", max_repos)
+    _validate_positive("max-searches", max_searches)
+    discovery = frontier.get("discovery_queues", {}) if isinstance(frontier, dict) else {}
+    reviewed_repos = set(_normalize_repo_list(state.get("reviewed_github_repos", [])))
+    reviewed_searches = {
+        str(item).strip().lower()
+        for item in state.get("reviewed_github_searches", [])
+        if str(item).strip()
+    }
+
+    repos = []
+    for item in _merge_github_repo_discovery(discovery.get("github-repo-research", [])):
+        repo = _normalize_repo_name(item.get("repo") or item.get("url"))
+        if not repo or repo in reviewed_repos:
+            continue
+        repos.append({**item, "repo": repo, "url": f"https://github.com/{repo}"})
+        if len(repos) >= max_repos:
+            break
+
+    searches = []
+    for item in _merge_github_search_discovery(discovery.get("github-search", [])):
+        query = str(item.get("query", "")).strip()
+        if not query or query.lower() in reviewed_searches:
+            continue
+        searches.append({**item, "query": query})
+        if len(searches) >= max_searches:
+            break
+    return {"repositories": repos, "searches": searches}
 
 
 def run_plan(args: argparse.Namespace) -> int:
@@ -827,6 +1156,42 @@ def run_session(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_github_plan(args: argparse.Namespace) -> int:
+    _validate_positive("max-repos", args.max_repos)
+    _validate_positive("max-searches", args.max_searches)
+    state = load_state(args.state)
+    frontier = load_frontier(args.queue)
+    batch = select_github_research_batch(frontier, state, args.max_repos, args.max_searches)
+    task = build_github_task(
+        args.mode,
+        args.query,
+        args.queue,
+        batch["repositories"],
+        batch["searches"],
+        args.max_repos,
+        args.max_searches,
+    )
+    write_json(args.output / f"github_task_{args.mode}.json", task)
+    save_state(args.state, state)
+    return 0
+
+
+def run_github_result(args: argparse.Namespace) -> int:
+    task = json.loads(args.task.read_text(encoding="utf-8"))
+    github_readings = load_readings(args.readings)
+    result = build_github_result(task, github_readings)
+    mode = validate_mode(str(result["mode"]))
+    write_json(args.output / f"github_result_{mode}.json", result)
+    state = load_state(args.state)
+    state["reviewed_github_repos"] = state["reviewed_github_repos"] + result["reviewed_github_repos"]
+    state["reviewed_github_searches"] = state["reviewed_github_searches"] + result["reviewed_github_searches"]
+    save_state(args.state, state)
+    frontier_path = str(task.get("frontier_queue", "")).strip()
+    if frontier_path:
+        merge_discovery_into_frontier(Path(frontier_path), result["discovery_queues"])
+    return 0
+
+
 def _next_session_path(output: Path, mode: str) -> Path:
     stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     path = output / f"session_{mode}_{stamp}.json"
@@ -888,7 +1253,34 @@ def build_parser() -> argparse.ArgumentParser:
     session.add_argument("--stop-reason", required=True)
     session.set_defaults(func=run_session)
 
+    github_plan = subparsers.add_parser("github-plan", help="从发现队列生成 GitHub 深挖任务包。")
+    github_plan.add_argument("--mode", required=True, choices=sorted(MODES))
+    github_plan.add_argument("--query", default="")
+    github_plan.add_argument("--queue", type=Path, default=Path("state/linuxdo_frontier_queue.json"))
+    github_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    github_plan.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    github_plan.add_argument("--max-repos", type=int, default=8)
+    github_plan.add_argument("--max-searches", type=int, default=5)
+    github_plan.set_defaults(func=run_github_plan)
+
+    github_result = subparsers.add_parser("github-result", help="保存 GitHub 深挖结果，并把相关仓库和搜索词回流发现队列。")
+    github_result.add_argument("--task", type=Path, required=True)
+    github_result.add_argument("--readings", type=Path, required=True)
+    github_result.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    github_result.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    github_result.set_defaults(func=run_github_result)
+
     return parser
+
+
+def _github_instructions(mode: str) -> str:
+    return (
+        "请使用 GitHub MCP 或 GitHub 官方页面深挖 next_batch 中的仓库和搜索词；"
+        "不要把 GitHub 当作替代 Linux.do 的主阅读源，而是作为项目、skill、插件、工具和工作流线索的验证与延展源。"
+        "每个仓库至少检查 README/描述、最近提交或 release、issue/PR 活跃度、安装或使用成本、与现有工具的重叠、风险和替代方案。"
+        "搜索词应返回值得继续看的仓库候选，不要只按 stars 排序；优先实际可用、近期活跃、与 AI coding/workflow/skill/plugin/MCP 相关的项目。"
+        f"当前模式：{mode}。输出 github_readings JSON，保留推荐等级、confidence、related_repos 和 related_tools。"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

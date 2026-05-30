@@ -12,10 +12,13 @@ Use this reference when the user invokes `/goal`, asks Codex to keep surfing, or
    - author-tracking: high-signal authors;
    - comment-reference: Linux.do links and referenced discussions;
    - tool-lookup: tools, skills, plugins, MCP servers, CLI names, workflows;
-   - skill-workflow-evidence: community evidence for skill management.
+   - skill-workflow-evidence: community evidence for skill management;
+   - github-repo-research: concrete GitHub repositories worth checking;
+   - github-search: search queries for tools, skills, plugins, MCP servers, CLIs, and workflows.
 6. Save a session. This merges discovery queues back into the frontier.
-7. Report a compact checkpoint: best findings, priority buckets, stop/continue reason, and saved artifact path.
-8. Continue if the goal is not met and the budget allows it.
+7. If GitHub evidence is needed, generate a GitHub task with `github-plan`, inspect with GitHub MCP or official GitHub pages, and save with `github-result`.
+8. Report a compact checkpoint: best findings, priority buckets, stop/continue reason, and saved artifact path.
+9. Continue if the goal is not met and the budget allows it.
 
 ## Extension Rule
 
@@ -24,6 +27,7 @@ Use this reference when the user invokes `/goal`, asks Codex to keep surfing, or
 Do not extend every link. Extend only when it can improve the target:
 
 - better evidence for a tool or skill;
+- GitHub repo health, README quality, recent activity, issues, releases, alternatives, and setup cost;
 - strong positive or negative community feedback;
 - a workflow that solves the user's current bottleneck;
 - a reply that names a better alternative;

@@ -24,11 +24,12 @@ Each reading should include:
   "tools": [],
   "action_items": [],
   "follow_up_links": [],
+  "github_repos": [],
   "confidence": "high|medium|low"
 }
 ```
 
-`id`, `title`, `url`, and `summary` should be present whenever possible. `author`, reply arrays, feedback, tools, `follow_up_links`, and `confidence` are what make follow-up and evidence extraction useful.
+`id`, `title`, `url`, and `summary` should be present whenever possible. `author`, reply arrays, feedback, tools, `follow_up_links`, `github_repos`, and `confidence` are what make follow-up and evidence extraction useful.
 
 ## Active-Old Posts
 
@@ -59,6 +60,8 @@ Use compact objects:
 Links and tool names should also appear in top-level `tools` when they are central to the post.
 
 Put links worth extending into `follow_up_links`. Do not include every URL; include links that can improve the current goal or reveal better evidence.
+
+Put concrete GitHub repositories worth checking into `github_repos` when the post or replies mention projects, plugins, skills, MCP servers, CLIs, or workflows. Tool names without a repo should still go into `tools`; the state helper can turn them into GitHub search leads.
 
 ## Evidence Rules
 

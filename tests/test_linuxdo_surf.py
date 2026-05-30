@@ -120,18 +120,40 @@ class LinuxdoSurfTests(unittest.TestCase):
         with TemporaryDirectoryPath() as tmp_path:
             state = linuxdo_surf.load_state(tmp_path / "missing.json")
 
-        self.assertEqual(state, {"read_topic_ids": [], "synced_skill_names": []})
+        self.assertEqual(
+            state,
+            {
+                "read_topic_ids": [],
+                "synced_skill_names": [],
+                "reviewed_github_repos": [],
+                "reviewed_github_searches": [],
+            },
+        )
 
     def test_save_state_normalizes_topic_ids_and_skill_names(self):
         with TemporaryDirectoryPath() as tmp_path:
             path = tmp_path / "state.json"
 
-            linuxdo_surf.save_state(path, {"read_topic_ids": [3, "2", 3], "synced_skill_names": ["A", "a", "B"]})
+            linuxdo_surf.save_state(
+                path,
+                {
+                    "read_topic_ids": [3, "2", 3],
+                    "synced_skill_names": ["A", "a", "B"],
+                    "reviewed_github_repos": [
+                        "https://github.com/openai/codex",
+                        "OpenAI/Codex",
+                        "bad value",
+                    ],
+                    "reviewed_github_searches": ["codex skill", "Codex Skill"],
+                },
+            )
 
             saved = linuxdo_surf.load_state(path)
 
         self.assertEqual(saved["read_topic_ids"], [2, 3])
         self.assertEqual(saved["synced_skill_names"], ["A", "B"])
+        self.assertEqual(saved["reviewed_github_repos"], ["openai/codex"])
+        self.assertEqual(saved["reviewed_github_searches"], ["codex skill"])
 
     def test_build_browser_task_contains_mode_budget_and_candidates(self):
         candidates = [
@@ -301,6 +323,37 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(discovery["author-tracking"][0]["username"], "alice")
         self.assertEqual(discovery["comment-reference"][0]["target_url"], "https://linux.do/t/topic/20")
         self.assertEqual([item["name"] for item in discovery["tool-lookup"]], ["workflow-kit", "skill-router"])
+
+    def test_extract_discovery_items_builds_github_repo_and_search_queues(self):
+        readings = [
+            {
+                "id": 11,
+                "url": "https://linux.do/t/topic/11",
+                "title": "Codex repo",
+                "summary": "推荐研究 https://github.com/openai/codex 和 workflow-kit。",
+                "tools": ["workflow-kit"],
+                "positive_feedback": ["README 清楚"],
+                "high_value_replies": [
+                    {
+                        "id": 101,
+                        "author": "bob",
+                        "links": ["https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem"],
+                    }
+                ],
+            }
+        ]
+
+        discovery = linuxdo_surf.extract_discovery_items(readings)
+
+        self.assertEqual(
+            [item["repo"] for item in discovery["github-repo-research"]],
+            ["openai/codex", "modelcontextprotocol/servers"],
+        )
+        self.assertEqual(discovery["github-repo-research"][0]["source_topic_ids"], [11])
+        self.assertEqual(discovery["github-repo-research"][0]["source_urls"], ["https://linux.do/t/topic/11"])
+        self.assertIn("README", discovery["github-repo-research"][0]["focus"])
+        self.assertEqual(discovery["github-search"][0]["query"], "workflow-kit")
+        self.assertEqual(discovery["github-search"][0]["source_tool"], "workflow-kit")
 
     def test_cli_plan_writes_browser_task_and_state(self):
         with TemporaryDirectoryPath() as tmp_path:
@@ -519,6 +572,148 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(task["next_batch"][0]["id"], 30)
         self.assertEqual(task["next_batch"][0]["queue"], "comment-reference")
+
+    def test_cli_github_plan_writes_task_from_frontier_and_skips_reviewed_repos(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            queue_path = tmp_path / "frontier.json"
+            queue_path.write_text(
+                json.dumps(
+                    {
+                        "queues": {"new": [], "active-old": [], "low-traffic": []},
+                        "discovery_queues": {
+                            "github-repo-research": [
+                                {"repo": "openai/codex", "url": "https://github.com/openai/codex", "score": 5},
+                                {"repo": "modelcontextprotocol/servers", "url": "https://github.com/modelcontextprotocol/servers", "score": 3},
+                            ],
+                            "github-search": [
+                                {"query": "codex skill", "source_tool": "codex skill", "score": 2},
+                                {"query": "workflow-kit", "source_tool": "workflow-kit", "score": 1},
+                            ],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            state_path = tmp_path / "state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "reviewed_github_repos": ["openai/codex"],
+                        "reviewed_github_searches": ["codex skill"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "github-plan",
+                    "--mode",
+                    "discover",
+                    "--query",
+                    "AI coding workflow",
+                    "--queue",
+                    str(queue_path),
+                    "--state",
+                    str(state_path),
+                    "--output",
+                    str(out_dir),
+                    "--max-repos",
+                    "3",
+                    "--max-searches",
+                    "3",
+                ]
+            )
+
+            task = json.loads((out_dir / "github_task_discover.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(task["control_channel"], "github-mcp")
+        self.assertEqual([item["repo"] for item in task["next_batch"]["repositories"]], ["modelcontextprotocol/servers"])
+        self.assertEqual([item["query"] for item in task["next_batch"]["searches"]], ["workflow-kit"])
+        self.assertIn("GitHub MCP", task["instructions"])
+
+    def test_cli_github_result_updates_state_and_merges_followup_repos(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            queue_path = tmp_path / "frontier.json"
+            queue_path.write_text(
+                json.dumps(
+                    {
+                        "queues": {"new": [], "active-old": [], "low-traffic": []},
+                        "discovery_queues": {
+                            "github-repo-research": [],
+                            "github-search": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            task_path = tmp_path / "github_task_discover.json"
+            task_path.write_text(
+                json.dumps(
+                    {
+                        "mode": "discover",
+                        "query": "workflow",
+                        "frontier_queue": str(queue_path),
+                        "next_batch": {"repositories": [{"repo": "openai/codex"}], "searches": []},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            readings_path = tmp_path / "github_readings.json"
+            readings_path.write_text(
+                json.dumps(
+                    {
+                        "github_readings": [
+                            {
+                                "repo": "openai/codex",
+                                "url": "https://github.com/openai/codex",
+                                "summary": "CLI 活跃，README 清楚。",
+                                "stars": 100000,
+                                "last_commit_at": "2026-05-30T00:00:00Z",
+                                "positive_signals": ["活跃维护"],
+                                "risk_notes": ["需要本地环境"],
+                                "related_repos": ["https://github.com/openai/openai-python"],
+                                "related_tools": ["openai-python"],
+                                "recommendation": "收藏观察",
+                                "confidence": "medium",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+            state_path = tmp_path / "state.json"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "github-result",
+                    "--task",
+                    str(task_path),
+                    "--readings",
+                    str(readings_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(state_path),
+                ]
+            )
+
+            result = json.loads((out_dir / "github_result_discover.json").read_text(encoding="utf-8"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            frontier = json.loads(queue_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["reviewed_github_repos"], ["openai/codex"])
+        self.assertEqual(result["items"][0]["recommendation"], "收藏观察")
+        self.assertEqual(state["reviewed_github_repos"], ["openai/codex"])
+        self.assertEqual(frontier["discovery_queues"]["github-repo-research"][0]["repo"], "openai/openai-python")
+        self.assertEqual(frontier["discovery_queues"]["github-search"][0]["query"], "openai-python")
 
     def test_cli_plan_rejects_unknown_channel(self):
         with TemporaryDirectoryPath() as tmp_path:

@@ -12,6 +12,7 @@ For each skill, tool, plugin, or workflow candidate, preserve:
 - negative feedback;
 - comparison notes;
 - risk notes;
+- GitHub project health when available;
 - trial recommendation;
 - whether GitHub or official documentation needs verification.
 
@@ -27,6 +28,6 @@ Use plain recommendations:
 
 ## What Counts As Useful Evidence
 
-Useful evidence includes real usage reports, failure cases, comparisons with alternatives, long-term updates, setup friction, conflict with other skills, and comments from high-signal authors. A single enthusiastic mention is a lead, not proof.
+Useful evidence includes real usage reports, failure cases, comparisons with alternatives, long-term updates, setup friction, conflict with other skills, comments from high-signal authors, and GitHub health signals such as recent commits, issue quality, README clarity, release cadence, and maintenance risk. A single enthusiastic mention is a lead, not proof.
 
 When the user asks to check many skills, prioritize those with conflicting or repeated community mentions. If a skill has no Linux.do evidence, say so and do not invent community feedback.

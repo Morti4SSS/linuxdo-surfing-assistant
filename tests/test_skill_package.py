@@ -17,6 +17,9 @@ class LinuxdoSurfingSkillPackageTests(unittest.TestCase):
         self.assertIn("name: linuxdo-surfing", text)
         self.assertRegex(text, r"description: .*(Linux\.do|linux\.do)")
         self.assertIn("Codex 内置浏览器", text)
+        self.assertIn("GitHub", text)
+        self.assertIn("github-plan", text)
+        self.assertIn("github-result", text)
         self.assertIn("/goal", text)
         self.assertIn("持续迭代", text)
         self.assertIn("延展冲浪", text)
@@ -42,6 +45,7 @@ class LinuxdoSurfingSkillPackageTests(unittest.TestCase):
             "references/surfing-modes.md",
             "references/skill-evidence.md",
             "references/linuxdo-reading-playbook.md",
+            "references/github-research.md",
         ]
 
         for relative_path in expected:
@@ -70,6 +74,19 @@ class LinuxdoSurfingSkillPackageTests(unittest.TestCase):
         self.assertIn("每个读过的帖子", reading_schema)
         self.assertIn("已读帖子索引", continuous_loop)
         self.assertIn("已读帖子索引", surfing_modes)
+
+    def test_references_cover_github_research_loop(self):
+        github_research = (ROOT / "references" / "github-research.md").read_text(encoding="utf-8")
+        continuous_loop = (ROOT / "references" / "continuous-loop.md").read_text(encoding="utf-8")
+        reading_schema = (ROOT / "references" / "reading-schema.md").read_text(encoding="utf-8")
+        skill_evidence = (ROOT / "references" / "skill-evidence.md").read_text(encoding="utf-8")
+
+        self.assertIn("GitHub is an evidence and extension source", github_research)
+        self.assertIn("github_readings", github_research)
+        self.assertIn("github-repo-research", continuous_loop)
+        self.assertIn("github-search", continuous_loop)
+        self.assertIn("github_repos", reading_schema)
+        self.assertIn("GitHub health signals", skill_evidence)
 
     def test_openai_yaml_matches_skill_identity(self):
         config_path = ROOT / "agents" / "openai.yaml"

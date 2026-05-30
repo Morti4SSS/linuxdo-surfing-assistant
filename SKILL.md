@@ -11,13 +11,15 @@ This is a Codex browser-reading skill for Linux.do. The skill is the product: it
 
 Use this skill when the user asks to:
 
-- surf Linux.do, 淘金, 找帖子, 查 AI 工具, 查 skill 评价, 找工作流, or avoid falling behind;
+- surf Linux.do, 淘金, 找帖子, 查 AI 工具, 查 skill 评价, 找工作流, 查 GitHub 项目, or avoid falling behind;
 - research a topic from Linux.do posts;
 - inspect posts the user already opened in Chrome;
 - continue a previous Linux.do surfing session;
+- verify Linux.do-discovered projects, skills, plugins, tools, workflows, or repos on GitHub;
+- search GitHub for useful AI coding, workflow, skill, plugin, MCP, or CLI projects using the same frontier-loop mindset;
 - run `/goal` or long-running continuous surfing until a target or stop condition is met.
 
-Do not use this skill for generic web research outside Linux.do unless Linux.do discussion is the evidence source.
+Do not use this skill for generic web research outside Linux.do unless Linux.do discussion or GitHub project evidence is the evidence source.
 
 ## Core Rule
 
@@ -32,7 +34,8 @@ Reading is browser-first. Linux.do requires login state, so use Codex 内置浏�
 5. Extract leads from the post and replies: authors, Linux.do links, mentioned tools, skill names, plugins, GitHub repos, workflows, risks, and comparisons.
 6. For `/goal` or this skill's continuous mode, 持续迭代: after every batch, use valuable leads from the current posts to 延展冲浪 into the next batch when they match the user's target. Continue until the budget or stop condition is reached.
 7. Save the batch with `scripts/linuxdo_surf.py session` so read state and discovery queues are preserved.
-8. If the output should feed the skill-management project, create a skill evidence package. See `references/skill-evidence.md`.
+8. When repos, projects, skills, plugins, tools, or workflows need validation, generate a GitHub task with `scripts/linuxdo_surf.py github-plan`, inspect with GitHub MCP or official GitHub pages, then save findings with `scripts/linuxdo_surf.py github-result`. See `references/github-research.md`.
+9. If the output should feed the skill-management project, create a skill evidence package. See `references/skill-evidence.md`.
 
 For self-selected posts or lightweight goldmine searches, read only the requested number of posts and stop with a compact result. Do not invent a next-batch loop unless the user invokes `/goal`, asks to continue until a target, or explicitly requests sustained surfing.
 
@@ -44,6 +47,7 @@ When invoked through `/goal` or asked to keep surfing, do not treat the task as 
 - read posts deeply with the browser;
 - identify new valuable leads inside posts and comments;
 - extend the search through those leads when relevant;
+- verify concrete repos or search GitHub when Linux.do mentions projects, skills, plugins, MCP servers, CLIs, or workflows worth deeper evidence;
 - save a session;
 - continue from the updated frontier until a stop condition is met.
 
@@ -58,10 +62,12 @@ Use `scripts/linuxdo_surf.py` for deterministic state work. It delegates to `too
 ```powershell
 python scripts/linuxdo_surf.py goal-plan --mode goldmine --queue state/linuxdo_frontier_queue.json --state state/linuxdo_surf_state.json
 python scripts/linuxdo_surf.py session --task output/linuxdo_surf/goal_task_goldmine.json --readings output/linuxdo_surf/readings.json --stop-reason "达到本轮深读预算"
+python scripts/linuxdo_surf.py github-plan --mode discover --queue state/linuxdo_frontier_queue.json --state state/linuxdo_surf_state.json
+python scripts/linuxdo_surf.py github-result --task output/linuxdo_surf/github_task_discover.json --readings output/linuxdo_surf/github_readings.json
 python scripts/linuxdo_surf.py evidence --skills skill-creator --readings output/linuxdo_surf/readings.json
 ```
 
-The script does not replace reading. It only ranks candidates, stores sessions, merges discovery queues, and prevents duplicate work.
+The script does not replace reading or GitHub inspection. It only ranks candidates, stores sessions, merges discovery queues, generates GitHub task packages, and prevents duplicate work.
 
 ## Output Style
 
