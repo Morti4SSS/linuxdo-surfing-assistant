@@ -25,6 +25,13 @@ Each reading should include:
   "action_items": [],
   "follow_up_links": [],
   "github_repos": [],
+  "json_read": true,
+  "render_required": false,
+  "render_reasons": [],
+  "render_checked": false,
+  "image_checked": false,
+  "visual_notes": "",
+  "confidence_after_render": "",
   "visual_evidence_needed": false,
   "visual_reason": "",
   "visual_review_priority": "low",
@@ -36,6 +43,30 @@ Each reading should include:
 ```
 
 `id`, `title`, `url`, and `summary` should be present whenever possible. `author`, reply arrays, feedback, tools, `follow_up_links`, `github_repos`, and `confidence` are what make follow-up and evidence extraction useful.
+
+## JSON-First + Render-On-Demand Fields
+
+Linux.do reading should be JSON-first + 按需渲染核验 when possible. `json_read: true` means the post was read through the authenticated `/t/{id}.json` structure. JSON is good for title, body, replies, authors, links, and floor structure, but it cannot prove screenshots, videos, UI, visual workflow, install screens, document layout, or aesthetic claims.
+
+Every JSON reading must decide:
+
+- `render_required`: `true` when the original rendered post or images must be checked before trusting the conclusion.
+- `render_reasons`: short reasons such as `命中视觉关键词：WebUI`, `教程/安装/配置/构建内容需要渲染页或截图核验`, or `low/medium confidence 但 value tag 是 马上试`.
+- `render_checked`: `true` only after opening the original rendered Linux.do page and checking the relevant visual or layout evidence.
+- `image_checked`: `true` only after opening or visually inspecting the relevant images/screenshots/videos/attachments.
+- `visual_notes`: compact notes from the rendered page, not a full reread.
+- `confidence_after_render`: `high`, `medium`, or `low` after visual核验; leave empty if render was not required or not checked.
+
+Set `render_required=true` for:
+
+- title/body/replies containing 多图, 截图, 图片, 演示, 视频, UI, WebUI, 前端, 审美, 卡片, 可视化, dashboard, 状态栏, 流程图, 执行链路, review-fix, or lite-plan;
+- images, videos, attachments, or screenshots where the conclusion depends on visual evidence;
+- tutorials, installation, configuration, build, one-click script, Windows, PowerShell, command output, or error-screenshot content;
+- Word, Excel, PPT, Markdown, layout, formatting, or document-output effects;
+- JSON confidence `low` or `medium` while the value tag or recommendation is `马上试`;
+- visual references such as 如图, 看图, 上图, 下图, 截图里, or 效果如下.
+
+可跳过渲染 when the post is pure short Q&A, pure complaint, pure resource entrance, pure model score, low-value/no-action content, or JSON already supports the conclusion and there is no visual, operation-step, or interface judgment.
 
 ## Active-Old Posts
 
@@ -69,7 +100,7 @@ Put links worth extending into `follow_up_links`. Do not include every URL; incl
 
 Put concrete GitHub repositories worth checking into `github_repos` when the post or replies mention projects, plugins, skills, MCP servers, CLIs, or workflows. Tool names without a repo should still go into `tools`; the state helper can turn them into GitHub search leads.
 
-Use the visual review fields for posts whose value depends on rendered pages rather than plain text. Set `visual_evidence_needed` to `true` when the post uses screenshots, video, UI/WebUI/TUI, cards, layouts, charts, tutorial screenshots, installation/configuration screens, workflow diagrams, or aesthetic claims that JSON text cannot verify well. Use `visual_review_status` values like `needed`, `checked`, or `not-needed` and preserve short notes in `visual_review_notes`.
+The older `visual_evidence_needed`, `visual_reason`, `visual_review_priority`, `visual_review_status`, `visual_review_notes`, and `visual_assets` fields remain compatible aliases for old sessions and `visual-review-plan`. New records should prefer the `render_*` fields above, then mirror important notes into the visual fields only when useful.
 
 ## Evidence Rules
 

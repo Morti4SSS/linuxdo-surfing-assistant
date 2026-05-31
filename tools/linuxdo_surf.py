@@ -381,6 +381,8 @@ def _browser_instructions(mode: str, control_channel: str, research_strategy: st
     return (
         channel_notes[control_channel]
         + strategy_notes[research_strategy]
+        + "默认采用 JSON-first + 按需渲染核验：可用登录态浏览器访问 `/t/{id}.json` 高效提取标题、正文、回复、作者、链接和楼层结构；"
+        + "但每帖 JSON 深读后必须判断 `render_required`，遇到截图、图片、视频、UI、教程步骤、排版效果或低信心高价值结论时，打开原帖渲染页和图片核验。"
         + "读取首帖和高价值回复，区分事实、观点、争议和行动建议。"
         + f"当前模式：{mode}。不要生成固定日报，只输出本轮任务结果。"
     )
@@ -394,8 +396,11 @@ def _goal_instructions(mode: str, research_strategy: str) -> str:
         "github-only": "本策略通常不使用 /goal 阅读 Linux.do；若生成此任务，只记录社区反馈缺口。",
     }
     return (
-        "用于 /goal 长任务：仍必须使用 Codex 内置浏览器按 next_batch 逐帖阅读 Linux.do，保存每帖摘要、关键证据、工具名、作者、"
-        "高价值回复和可继续扩展的引用。活跃老帖必须阅读首帖、关键历史回复和近期回复，不要只看最新回复。"
+        "用于 /goal 长任务：仍必须使用 Codex 内置浏览器按 next_batch 逐帖阅读 Linux.do。"
+        "每批默认 20 帖先 JSON 深读，再筛出 `render_required=true` 的帖子；每批渲染回看上限 6-8 帖，"
+        "优先回看 `马上试 + render_required`，再回看 `收藏观察 + render_required`，超过上限时按价值、视觉依赖强度和 confidence 风险排序。"
+        "保存每帖摘要、关键证据、工具名、作者、高价值回复、`json_read`、`render_required`、`render_checked`、`image_checked`、"
+        "本批已回看渲染、本批待回看渲染和因低价值跳过渲染。活跃老帖必须阅读首帖、关键历史回复和近期回复，不要只看最新回复。"
         + strategy_notes[research_strategy]
         + f"当前模式：{mode}。完成停止条件后调用 session 记录本轮结果。"
     )
@@ -425,6 +430,7 @@ def build_mode_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> d
                 "follow_up_links": reading.get("follow_up_links", []),
                 "github_repos": reading.get("github_repos", []),
                 "confidence": reading.get("confidence", ""),
+                "recommendation": reading.get("recommendation") or reading.get("value_tag", ""),
                 **visual_review,
             }
         )
@@ -440,11 +446,16 @@ def build_mode_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> d
 
 
 def _visual_review_fields(reading: dict[str, Any]) -> dict[str, Any]:
-    explicit_needed = bool(reading.get("visual_evidence_needed", False))
-    inferred_needed, inferred_reason, inferred_priority = infer_visual_review_need(reading)
-    needed = explicit_needed or inferred_needed
-    status = str(reading.get("visual_review_status") or ("needed" if needed else "not-needed"))
+    render = _render_review_fields(reading)
+    needed = render["render_required"]
+    inferred_reason = "; ".join(render["render_reasons"])
+    inferred_priority = _render_priority_from_reasons(render["render_reasons"])
+    status = str(
+        reading.get("visual_review_status")
+        or ("checked" if render["render_checked"] else ("needed" if needed else "not-needed"))
+    )
     return {
+        **render,
         "visual_evidence_needed": needed,
         "visual_reason": reading.get("visual_reason") or inferred_reason,
         "visual_review_priority": reading.get("visual_review_priority") or inferred_priority,
@@ -454,41 +465,200 @@ def _visual_review_fields(reading: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def infer_visual_review_need(reading: dict[str, Any]) -> tuple[bool, str, str]:
-    haystack = " ".join(
-        [
-            str(reading.get("title", "")),
-            str(reading.get("summary", "")),
-            str(reading.get("first_post", "")),
-            " ".join(str(item) for item in _field_as_list(reading.get("tools", []))),
-            " ".join(str(item) for item in _field_as_list(reading.get("action_items", []))),
-        ]
-    ).lower()
-    high_keywords = [
+def _render_review_fields(reading: dict[str, Any]) -> dict[str, Any]:
+    inferred = infer_render_required(reading)
+    explicit_render = _optional_bool(reading.get("render_required"))
+    explicit_visual = _optional_bool(reading.get("visual_evidence_needed"))
+    if explicit_render is None:
+        render_required = explicit_visual if explicit_visual is not None else inferred["render_required"]
+    else:
+        render_required = explicit_render
+
+    explicit_reasons = _field_as_list(reading.get("render_reasons", []))
+    reasons = explicit_reasons or inferred["render_reasons"]
+    if not reasons and reading.get("visual_reason"):
+        reasons = [str(reading.get("visual_reason"))]
+
+    render_checked = bool(reading.get("render_checked", False)) or str(
+        reading.get("visual_review_status", "")
+    ).lower() == "checked"
+    image_checked = bool(reading.get("image_checked", False))
+    return {
+        "json_read": bool(reading.get("json_read", True)),
+        "render_required": render_required,
+        "render_reasons": reasons,
+        "render_checked": render_checked,
+        "image_checked": image_checked,
+        "visual_notes": str(reading.get("visual_notes", "")).strip(),
+        "confidence_after_render": str(reading.get("confidence_after_render", "")).strip(),
+    }
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y"}:
+        return True
+    if text in {"false", "0", "no", "n"}:
+        return False
+    return None
+
+
+def infer_render_required(reading: dict[str, Any]) -> dict[str, Any]:
+    haystack = _render_haystack(reading)
+    reasons: list[str] = []
+    if _is_plain_low_value_skip(reading, haystack):
+        return {"render_required": False, "render_reasons": []}
+
+    visual_keywords = [
+        "多图",
+        "截图",
+        "图片",
+        "演示",
+        "视频",
         "ui",
         "webui",
         "web ui",
-        "tui",
-        "可视化",
-        "状态栏",
-        "卡片",
-        "dashboard",
-        "界面",
+        "前端",
         "审美",
-        "排版",
+        "卡片",
+        "可视化",
+        "dashboard",
+        "状态栏",
+        "流程图",
+        "执行链路",
+        "review-fix",
+        "lite-plan",
     ]
-    medium_keywords = ["安装", "配置", "教程", "命令输出", "workflow", "工作流", "多 agent", "multi-agent", "编排"]
-    asset_keywords = ["截图", "图片", "视频"]
-    for keyword in high_keywords:
+    tutorial_keywords = [
+        "教程",
+        "安装",
+        "配置",
+        "构建",
+        "一键脚本",
+        "windows",
+        "powershell",
+        "错误截图",
+        "命令输出",
+    ]
+    document_keywords = ["word", "excel", "ppt", "markdown", "排版", "文档产物", "文档效果"]
+    visual_refs = ["如图", "看图", "上图", "下图", "截图里", "效果如下"]
+    tutorial_present = any(keyword in haystack for keyword in tutorial_keywords)
+    document_present = any(keyword in haystack for keyword in document_keywords)
+
+    if tutorial_present:
+        reasons.append("教程/安装/配置/构建内容需要渲染页或截图核验")
+    for keyword in visual_keywords:
+        if tutorial_present and keyword in {"多图", "截图", "图片", "演示", "视频"}:
+            continue
         if keyword in haystack:
-            return True, f"命中视觉证据关键词：{keyword}", "high"
-    for keyword in medium_keywords:
-        if keyword in haystack:
-            return True, f"命中教程/流程视觉关键词：{keyword}", "medium"
-    for keyword in asset_keywords:
-        if keyword in haystack:
-            return True, f"命中视觉素材关键词：{keyword}", "high"
-    return False, "", "low"
+            reasons.append(f"命中视觉关键词：{keyword}")
+    if document_present:
+        reasons.append("文档/排版/产物效果需要渲染页或图片核验")
+    if any(keyword in haystack for keyword in visual_refs):
+        reasons.append("回复或正文包含视觉指代")
+    if _reading_has_visual_assets(reading):
+        reasons.append("帖子包含图片、视频或附件，且可能影响结论")
+    if _is_low_confidence_high_value(reading):
+        reasons.append("low/medium confidence 但 value tag 是 马上试")
+
+    reasons = _unique(reasons)
+    return {"render_required": bool(reasons), "render_reasons": reasons}
+
+
+def _is_plain_low_value_skip(reading: dict[str, Any], haystack: str) -> bool:
+    value = str(reading.get("value_tag") or reading.get("recommendation") or "").strip()
+    if value and value != "暂时跳过":
+        return False
+    skip_markers = ["纯短问答", "纯吐槽", "纯资源入口", "纯模型跑分", "无图无教程", "无图", "无教程"]
+    return any(marker in haystack for marker in skip_markers) and not _reading_has_visual_assets(reading)
+
+
+def _render_haystack(reading: dict[str, Any]) -> str:
+    values: list[str] = [
+        str(reading.get("title", "")),
+        str(reading.get("summary", "")),
+        str(reading.get("first_post", "")),
+        str(reading.get("visual_notes", "")),
+    ]
+    for field in [
+        "historical_replies",
+        "recent_replies",
+        "high_value_replies",
+        "positive_feedback",
+        "negative_feedback",
+        "risk_notes",
+        "comparison_notes",
+        "tools",
+        "action_items",
+        "visual_assets",
+    ]:
+        values.extend(_stringify_nested_values(reading.get(field, [])))
+    return " ".join(values).lower()
+
+
+def _stringify_nested_values(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        result: list[str] = []
+        for nested in value.values():
+            result.extend(_stringify_nested_values(nested))
+        return result
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            result.extend(_stringify_nested_values(item))
+        return result
+    if value is None:
+        return []
+    return [str(value)]
+
+
+def _reading_has_visual_assets(reading: dict[str, Any]) -> bool:
+    asset_fields = [
+        "images",
+        "image_urls",
+        "screenshots",
+        "videos",
+        "video_urls",
+        "attachments",
+        "visual_assets",
+    ]
+    for field in asset_fields:
+        value = reading.get(field)
+        if isinstance(value, list) and value:
+            return True
+        if isinstance(value, str) and value.strip():
+            return True
+    for field in ["image_count", "video_count", "attachment_count"]:
+        count = _safe_int(reading.get(field))
+        if count and count > 0:
+            return True
+    return False
+
+
+def _is_low_confidence_high_value(reading: dict[str, Any]) -> bool:
+    confidence = str(reading.get("confidence", "")).strip().lower()
+    value = str(reading.get("value_tag") or reading.get("recommendation") or "").strip()
+    return confidence in {"low", "medium"} and value == "马上试"
+
+
+def _render_priority_from_reasons(reasons: list[str]) -> str:
+    joined = " ".join(reasons).lower()
+    high_markers = ["视觉关键词", "视觉指代", "图片", "视频", "附件", "low/medium"]
+    if any(marker.lower() in joined for marker in high_markers):
+        return "high"
+    if reasons:
+        return "medium"
+    return "low"
+
+
+def infer_visual_review_need(reading: dict[str, Any]) -> tuple[bool, str, str]:
+    inferred = infer_render_required(reading)
+    reason = "; ".join(inferred["render_reasons"])
+    return inferred["render_required"], reason, _render_priority_from_reasons(inferred["render_reasons"])
 
 
 def build_session_record(task: dict[str, Any], readings: list[dict[str, Any]], stop_reason: str) -> dict[str, Any]:
@@ -545,9 +715,9 @@ def build_visual_review_task(
     for reading in readings:
         visual = _visual_review_fields(reading)
         reading_id = _safe_int(reading.get("id")) or 0
-        if not visual["visual_evidence_needed"]:
+        if not visual["render_required"]:
             continue
-        if visual["visual_review_status"] == "checked" or reading_id in checked_ids:
+        if visual["render_checked"] or visual["visual_review_status"] == "checked" or reading_id in checked_ids:
             continue
         candidates.append(
             {
@@ -555,12 +725,23 @@ def build_visual_review_task(
                 "title": reading.get("title", ""),
                 "url": reading.get("url", ""),
                 "summary": reading.get("summary", ""),
+                "recommendation": reading.get("recommendation") or reading.get("value_tag", ""),
+                "render_required": visual["render_required"],
+                "render_reasons": visual["render_reasons"],
+                "render_checked": visual["render_checked"],
+                "image_checked": visual["image_checked"],
                 "visual_reason": visual["visual_reason"],
                 "visual_review_priority": visual["visual_review_priority"],
                 "visual_assets": visual["visual_assets"],
             }
         )
-    candidates.sort(key=lambda item: (_visual_priority_rank(item["visual_review_priority"]), item["id"]))
+    candidates.sort(
+        key=lambda item: (
+            _value_tag_rank(item.get("recommendation", "")),
+            _visual_priority_rank(item["visual_review_priority"]),
+            item["id"],
+        )
+    )
     return {
         "task_type": "visual-review",
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -572,16 +753,24 @@ def build_visual_review_task(
 
 def _visual_review_instructions() -> str:
     return (
+        "For normal new surfing, the workflow is JSON-first + render-on-demand: after JSON reading, judge render_required and check the rendered page inside the same batch when budget allows. "
+        "This visual-review task is a fallback/backfill for 旧记录, missed checks, or batches where render_required items exceeded the render budget. "
         "Use Codex browser to open each Linux.do rendered page with logged-in state. "
-        "Do not treat existing JSON readings as proof that render review is complete. "
+        "Do not treat existing JSON readings as proof that render_required review is complete. "
         "Check screenshots, images, videos, UI/WebUI/TUI, tutorial steps, command output, workflow diagrams, cards, layout, and aesthetic claims. "
-        "Write findings back into visual_evidence_needed, visual_review_status, visual_review_notes, and visual_assets."
+        "Write findings back into render_checked, image_checked, visual_notes, confidence_after_render, render_reasons, visual_review_status, visual_review_notes, and visual_assets."
     )
 
 
 def _visual_priority_rank(priority: str) -> int:
     ranks = {"high": 0, "medium": 1, "low": 2}
     return ranks.get(str(priority).lower(), 3)
+
+
+def _value_tag_rank(value: Any) -> int:
+    text = str(value or "").strip()
+    ranks = {"马上试": 0, "收藏观察": 1, "暂时跳过": 2}
+    return ranks.get(text, 3)
 
 
 def build_github_result(task: dict[str, Any], github_readings: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1633,7 +1822,11 @@ def _flatten_items(items: list[dict[str, Any]], field: str) -> list[str]:
 def _render_checked_ids(items: list[dict[str, Any]]) -> list[int]:
     return [
         item_id
-        for item_id in (_safe_int(item.get("id")) for item in items if item.get("visual_review_status") == "checked")
+        for item_id in (
+            _safe_int(item.get("id"))
+            for item in items
+            if item.get("render_checked") or item.get("visual_review_status") == "checked"
+        )
         if item_id is not None
     ]
 

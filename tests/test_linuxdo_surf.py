@@ -187,6 +187,9 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(task["budget"], {"max_topics": 3, "max_replies_per_topic": 5})
         self.assertEqual(task["candidates"][0]["id"], 2)
         self.assertIn("Codex 内置浏览器", task["instructions"])
+        self.assertIn(".json", task["instructions"])
+        self.assertIn("JSON-first + 按需渲染核验", task["instructions"])
+        self.assertIn("render_required", task["instructions"])
         self.assertIn("Linux.do 为主", task["instructions"])
 
     def test_build_browser_task_defaults_to_codex_browser_channel(self):
@@ -231,6 +234,10 @@ class LinuxdoSurfTests(unittest.TestCase):
 
         self.assertEqual(task["control_channel"], "mac-goal")
         self.assertIn("Codex 内置浏览器", task["instructions"])
+        self.assertIn("每批默认 20 帖先 JSON 深读", task["instructions"])
+        self.assertIn("每批渲染回看上限 6-8 帖", task["instructions"])
+        self.assertIn("马上试 + render_required", task["instructions"])
+        self.assertIn("本批已回看渲染", task["instructions"])
         self.assertIn("/goal", task["instructions"])
 
     def test_build_mode_result_marks_read_topics_and_keeps_action_items(self):
@@ -300,6 +307,12 @@ class LinuxdoSurfTests(unittest.TestCase):
                 "id": 5,
                 "title": "Codex WebUI 预览",
                 "summary": "截图展示状态栏和布局。",
+                "json_read": True,
+                "render_required": True,
+                "render_reasons": ["UI 截图"],
+                "render_checked": False,
+                "image_checked": False,
+                "visual_notes": "要看渲染页",
                 "visual_evidence_needed": True,
                 "visual_reason": "UI 截图",
                 "visual_review_status": "needed",
@@ -319,14 +332,90 @@ class LinuxdoSurfTests(unittest.TestCase):
         second = result["items"][1]
 
         self.assertTrue(first["visual_evidence_needed"])
+        self.assertTrue(first["json_read"])
+        self.assertTrue(first["render_required"])
+        self.assertEqual(first["render_reasons"], ["UI 截图"])
+        self.assertFalse(first["render_checked"])
+        self.assertFalse(first["image_checked"])
+        self.assertEqual(first["visual_notes"], "要看渲染页")
         self.assertEqual(first["visual_reason"], "UI 截图")
         self.assertEqual(first["visual_review_status"], "needed")
         self.assertEqual(first["visual_review_notes"], ["要看渲染页"])
         self.assertEqual(first["visual_assets"], ["screenshot: status bar"])
         self.assertTrue(second["visual_evidence_needed"])
+        self.assertTrue(second["json_read"])
+        self.assertTrue(second["render_required"])
+        self.assertIn("安装", second["render_reasons"][0])
+        self.assertFalse(second["render_checked"])
+        self.assertFalse(second["image_checked"])
         self.assertEqual(second["visual_review_status"], "needed")
         self.assertIn("安装", second["visual_reason"])
         self.assertEqual(second["visual_review_priority"], "medium")
+
+    def test_render_required_rules_cover_visual_tutorial_confidence_and_skip_cases(self):
+        visual = linuxdo_surf.infer_render_required(
+            {
+                "title": "CCW WebUI review-fix lite-plan 演示",
+                "summary": "如图，状态栏和执行链路截图里能看出效果。",
+                "confidence": "medium",
+                "recommendation": "马上试",
+            }
+        )
+        tutorial = linuxdo_surf.infer_render_required(
+            {
+                "title": "Windows PowerShell 一键脚本安装教程",
+                "summary": "错误截图和配置步骤需要确认。",
+            }
+        )
+        low_value = linuxdo_surf.infer_render_required(
+            {
+                "title": "模型跑分闲聊",
+                "summary": "纯短问答，无图无教程。",
+                "confidence": "high",
+                "recommendation": "暂时跳过",
+            }
+        )
+
+        self.assertTrue(visual["render_required"])
+        self.assertIn("review-fix", " ".join(visual["render_reasons"]))
+        self.assertIn("视觉指代", " ".join(visual["render_reasons"]))
+        self.assertTrue(tutorial["render_required"])
+        self.assertIn("教程/安装/配置", " ".join(tutorial["render_reasons"]))
+        self.assertFalse(low_value["render_required"])
+        self.assertEqual(low_value["render_reasons"], [])
+
+    def test_build_visual_review_task_uses_render_required_and_prioritizes_value_tags(self):
+        readings = [
+            {
+                "id": 41,
+                "title": "收藏观察 UI",
+                "url": "https://linux.do/t/topic/41",
+                "summary": "UI 截图。",
+                "recommendation": "收藏观察",
+            },
+            {
+                "id": 42,
+                "title": "马上试 WebUI",
+                "url": "https://linux.do/t/topic/42",
+                "summary": "WebUI 演示截图。",
+                "recommendation": "马上试",
+            },
+            {
+                "id": 43,
+                "title": "低价值图片",
+                "url": "https://linux.do/t/topic/43",
+                "summary": "图片但只是资源入口。",
+                "recommendation": "暂时跳过",
+            },
+        ]
+
+        task = linuxdo_surf.build_visual_review_task(readings, {"render_checked_topic_ids": []}, max_topics=3)
+
+        self.assertEqual([item["id"] for item in task["items"]], [42, 41, 43])
+        self.assertTrue(task["items"][0]["render_required"])
+        self.assertIn("render_reasons", task["items"][0])
+        self.assertIn("JSON-first", task["instructions"])
+        self.assertIn("旧记录", task["instructions"])
 
     def test_build_skill_evidence_package_extracts_matching_skill_feedback(self):
         readings = [
@@ -1082,7 +1171,7 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(task["items"][0]["visual_review_priority"], "high")
         self.assertEqual(task["items"][1]["visual_review_priority"], "medium")
         self.assertIn("rendered page", task["instructions"])
-        self.assertIn("visual_evidence_needed", task["instructions"])
+        self.assertIn("render_required", task["instructions"])
 
     def test_cli_result_records_render_checked_ids_in_state(self):
         with TemporaryDirectoryPath() as tmp_path:
@@ -1108,8 +1197,10 @@ class LinuxdoSurfTests(unittest.TestCase):
                                 "title": "UI 工具",
                                 "url": "https://linux.do/t/topic/31",
                                 "summary": "已看过渲染页。",
-                                "visual_evidence_needed": True,
-                                "visual_review_status": "checked",
+                                "render_required": True,
+                                "render_checked": True,
+                                "image_checked": True,
+                                "confidence_after_render": "high",
                                 "visual_review_notes": ["确认了卡片布局"],
                             }
                         ]
@@ -1141,6 +1232,9 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(state["render_checked_topic_ids"], [31])
         self.assertEqual(result["items"][0]["visual_review_status"], "checked")
+        self.assertTrue(result["items"][0]["render_checked"])
+        self.assertTrue(result["items"][0]["image_checked"])
+        self.assertEqual(result["items"][0]["confidence_after_render"], "high")
 
     def test_cli_plan_rejects_unknown_channel(self):
         with TemporaryDirectoryPath() as tmp_path:

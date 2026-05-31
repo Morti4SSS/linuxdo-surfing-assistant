@@ -25,11 +25,13 @@ Use one of four lightweight strategies. Do not default to a heavy `hybrid` flow 
 ## Loop
 
 1. Run `scripts/linuxdo_surf.py github-plan` to create a GitHub task from frontier queues.
-2. Inspect concrete repos with GitHub MCP or official GitHub pages.
+2. Inspect concrete repos with GitHub MCP/API 优先 or official GitHub pages.
 3. Search GitHub for queued tool, skill, plugin, MCP, CLI, and workflow terms.
 4. Record findings as `github_readings`.
 5. Run `scripts/linuxdo_surf.py github-result` to update reviewed state and merge related repos/tools back into the frontier.
 6. Continue only if new leads are relevant to the current target.
+
+GitHub does not need the full Linux.do `render_required` batch machinery. GitHub MCP/API is usually enough for repo identity, README text, stars, issues, releases, and commit activity. Open the GitHub rendered page, README 截图, linked docs, or 项目 demo only when the recommendation depends on visual proof: UI screenshots, extension panels, workflow diagrams, terminal screenshots, dashboard/card previews, or install/demo media.
 
 For direct GitHub research, run:
 

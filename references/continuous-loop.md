@@ -6,23 +6,35 @@ Use this reference when the user invokes `/goal`, asks Codex to keep surfing, or
 
 1. Load or create a frontier queue with the state helper.
 2. Select the next batch across `new`, `active-old`, and `low-traffic`.
-3. Use Codex 内置浏览器 to read each post deeply.
-4. Record readings with the reading schema.
-5. Extract discovery leads:
+3. Use Codex 内置浏览器 with saved login state for JSON-first + 按需渲染核验. 每批默认 20 帖先 JSON 深读 through authenticated `/t/{id}.json` when possible.
+4. 每帖 JSON 深读后必须判断 `render_required`. Open rendered pages/images for required items within the same batch when the render budget allows.
+5. Record readings with the reading schema.
+6. Extract discovery leads:
    - author-tracking: high-signal authors;
    - comment-reference: Linux.do links and referenced discussions;
    - tool-lookup: tools, skills, plugins, MCP servers, CLI names, workflows;
    - skill-workflow-evidence: community evidence for skill management;
    - github-repo-research: concrete GitHub repositories worth checking;
    - github-search: search queries for tools, skills, plugins, MCP servers, CLIs, and workflows.
-6. Save a session. This merges discovery queues back into the frontier.
-7. If GitHub evidence is needed, generate a GitHub task with `github-plan`, inspect with GitHub MCP or official GitHub pages, and save with `github-result`.
-8. Report a compact checkpoint: best findings, priority buckets, stop/continue reason, and saved artifact path.
-9. Continue if the goal is not met and the budget allows it.
+7. Save a session. This merges discovery queues back into the frontier.
+8. If GitHub evidence is needed, generate a GitHub task with `github-plan`, inspect with GitHub MCP or official GitHub pages, and save with `github-result`.
+9. Report a compact checkpoint: best findings, priority buckets, render coverage, stop/continue reason, and saved artifact path.
+10. Continue if the goal is not met and the budget allows it.
 
 For `/goal`, prefer one主一辅策略 rather than a broad hybrid loop. Use `linuxdo-only` when the user wants pure community surfing, `linuxdo-first` when Linux.do discoveries should be verified on GitHub, and `github-first` only when GitHub findings need Linux.do community feedback. `github-only` belongs to GitHub tasks, not Linux.do browser reading.
 
-When a post depends on screenshots, UI/WebUI/TUI, video, tutorial install steps, workflow diagrams, or aesthetic/layout judgment, mark it for visual review instead of pretending JSON text is enough. Keep the default reading loop JSON-first, but let the queue carry `visual_evidence_needed`, `visual_review_priority`, and `visual_review_status` so a later render pass can pick only the posts that truly need it.
+When a post depends on screenshots, UI/WebUI/TUI, video, tutorial install steps, workflow diagrams, or aesthetic/layout judgment, do not pretend JSON text is enough. Set `render_required=true`, fill `render_reasons`, and check the rendered page in the same batch when possible. Keep `visual_evidence_needed`, `visual_review_priority`, and `visual_review_status` only as compatibility fields for older records and targeted `visual-review-plan`补核验.
+
+## Render Budget
+
+每批渲染回看上限 6-8 帖. Sort render candidates by:
+
+- `马上试 + render_required`;
+- `收藏观察 + render_required`;
+- stronger visual dependency, such as screenshots, UI/WebUI, videos, workflow diagrams, document layout, or install/config screens;
+- confidence risk, especially `low` or `medium` JSON confidence with a valuable recommendation.
+
+可跳过渲染 for pure short Q&A, pure complaints, pure resource entrances, pure model-score chatter, low-value/no-action posts, or posts where JSON already supports the conclusion and no visual, operation-step, or interface judgment is involved.
 
 ## Extension Rule
 
@@ -53,7 +65,7 @@ Before stopping for no harvest, run one adjustment pass: 切换热度排序, 切
 
 If a previous single-platform session/result has useful unresolved leads, run `backfill-plan` instead of rereading everything. This produces one compact auxiliary task from saved evidence and preserves the original lightweight pass.
 
-If a batch is visually suspicious or visually rich, do not force a full reread. Mark the item, keep the JSON reading, and enqueue a render回看 batch from the saved result/session. The point is to recover visual evidence surgically, not to double the whole surf pass.
+If a batch has more `render_required` posts than the render budget, do not force a full reread. Mark checked items with `render_checked=true`; leave the overflow as `render_required=true, render_checked=false`, then use `visual-review-plan` later only for old records, missed checks, or overflow补核验. The point is to recover visual evidence surgically, not to double the whole surf pass.
 
 ## Checkpoint Output
 
@@ -62,6 +74,7 @@ Long `/goal` runs should not create a huge chat report. After each batch, return
 - 3-5 high-signal findings or "本批无值得吸收的内容" as the top-findings brief;
 - priority buckets: `马上试`, `收藏观察`, `暂时跳过`;
 - 已读帖子索引: every post read in the batch with title, link, 发现状态, one-line summary, value tag, and expandable marker;
+- render coverage: 本批已回看渲染, 本批待回看渲染, 因低价值跳过渲染;
 - one-line evidence index for valuable items: key reply point and confidence;
 - next lead chosen for extension and why;
 - session or evidence file path.
