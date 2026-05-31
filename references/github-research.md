@@ -13,6 +13,15 @@ GitHub is an evidence and extension source. It does not replace Linux.do communi
 - Does it overlap with existing skills, plugins, or workflows?
 - Are there better alternatives linked from README, issues, topics, examples, or related repos?
 
+## Strategy Modes
+
+Use one of four lightweight strategies. Do not default to a heavy `hybrid` flow with two agents exchanging findings.
+
+- `linuxdo-only`: stay on Linux.do and record GitHub-looking leads for later.
+- `github-only`: search GitHub directly from the user's query or inspect known repos; no Linux.do pass is required.
+- `linuxdo-first`: read Linux.do first, then send only worthwhile projects, skills, plugins, tools, workflows, and repos to GitHub.
+- `github-first`: inspect GitHub first, then use Linux.do only to backfill community feedback or adoption signals.
+
 ## Loop
 
 1. Run `scripts/linuxdo_surf.py github-plan` to create a GitHub task from frontier queues.
@@ -21,6 +30,26 @@ GitHub is an evidence and extension source. It does not replace Linux.do communi
 4. Record findings as `github_readings`.
 5. Run `scripts/linuxdo_surf.py github-result` to update reviewed state and merge related repos/tools back into the frontier.
 6. Continue only if new leads are relevant to the current target.
+
+For direct GitHub research, run:
+
+```powershell
+python scripts/linuxdo_surf.py github-plan --mode discover --strategy github-only --query "codex workflow skill"
+```
+
+## Backfill
+
+Use `backfill-plan` when a previous single-platform result already exists and only the auxiliary platform is missing.
+
+- Linux.do result/session to GitHub: extracts repos and tool names from `items`, `readings`, or `github_repos`, merges them into the frontier, then writes `github_task_<mode>.json`.
+- GitHub result to Linux.do: extracts repo names, source queries, and related tools, optionally ranks `--topics`, then writes `browser_task_<mode>.json` with strategy `github-first`. If no topic cache is available, use the generated query to search Linux.do in the browser.
+
+```powershell
+python scripts/linuxdo_surf.py backfill-plan --source-platform linuxdo --mode discover --input output/linuxdo_surf/mode_result_discover.json
+python scripts/linuxdo_surf.py backfill-plan --source-platform github --mode discover --input output/linuxdo_surf/github_result_discover.json --topics output/linuxdo_skill_research/topic_details_top220.json
+```
+
+Backfill is a targeted补深挖 step, not a new long-running hybrid loop.
 
 ## GitHub Reading Shape
 

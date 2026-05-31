@@ -10,7 +10,9 @@ from typing import Any
 
 MODES = {"research", "goldmine", "skill-feedback", "discover"}
 CONTROL_CHANNELS = {"codex-browser", "user-chrome", "mac-goal"}
+RESEARCH_STRATEGIES = {"linuxdo-only", "github-only", "linuxdo-first", "github-first"}
 DEFAULT_CONTROL_CHANNEL = "codex-browser"
+DEFAULT_RESEARCH_STRATEGY = "linuxdo-only"
 PRIMARY_QUEUE_NAMES = ("new", "active-old", "low-traffic")
 DISCOVERY_QUEUE_NAMES = (
     "author-tracking",
@@ -38,6 +40,13 @@ def validate_channel(channel: str) -> str:
     normalized = channel.strip().lower()
     if normalized not in CONTROL_CHANNELS:
         raise ValueError(f"未知操控通道：{channel}")
+    return normalized
+
+
+def validate_research_strategy(strategy: str) -> str:
+    normalized = strategy.strip().lower()
+    if normalized not in RESEARCH_STRATEGIES:
+        raise ValueError(f"未知研究策略：{strategy}")
     return normalized
 
 
@@ -280,17 +289,20 @@ def build_browser_task(
     max_topics: int,
     max_replies: int,
     control_channel: str = DEFAULT_CONTROL_CHANNEL,
+    research_strategy: str = DEFAULT_RESEARCH_STRATEGY,
 ) -> dict[str, Any]:
     mode = validate_mode(mode)
     control_channel = validate_channel(control_channel)
+    research_strategy = validate_research_strategy(research_strategy)
     return {
         "mode": mode,
         "control_channel": control_channel,
+        "research_strategy": research_strategy,
         "query": query,
         "skill_names": skill_names,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "budget": {"max_topics": max_topics, "max_replies_per_topic": max_replies},
-        "instructions": _browser_instructions(mode, control_channel),
+        "instructions": _browser_instructions(mode, control_channel, research_strategy),
         "candidates": [
             {
                 "id": _safe_int(item.get("id")) or 0,
@@ -312,11 +324,14 @@ def build_goal_task(
     next_batch: list[dict[str, Any]],
     max_topics: int,
     max_replies: int,
+    research_strategy: str = DEFAULT_RESEARCH_STRATEGY,
 ) -> dict[str, Any]:
     mode = validate_mode(mode)
+    research_strategy = validate_research_strategy(research_strategy)
     return {
         "mode": mode,
         "control_channel": "mac-goal",
+        "research_strategy": research_strategy,
         "query": query,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "frontier_queue": str(frontier_path),
@@ -328,7 +343,7 @@ def build_goal_task(
             "达到本轮深读预算",
             "连续批次没有发现高价值候选",
         ],
-        "instructions": _goal_instructions(mode),
+        "instructions": _goal_instructions(mode, research_strategy),
         "next_batch": next_batch,
     }
 
@@ -348,24 +363,38 @@ def _normalize_state(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _browser_instructions(mode: str, control_channel: str) -> str:
+def _browser_instructions(mode: str, control_channel: str, research_strategy: str) -> str:
     channel_notes = {
         "codex-browser": "请使用 Codex 内置浏览器打开候选 Linux.do 帖子。首次需要登录时请让用户完成登录，后续复用已保存登录态。",
         "user-chrome": "请使用用户本机 Chrome 中已经打开或按标签组整理的 Linux.do 帖子，理解标签组和页面之间的关系；不要把这个通道当作全站搜索。",
         "mac-goal": "这是 /goal 长任务执行形态，不是独立阅读通道；仍需使用 Codex 内置浏览器读取 Linux.do。执行前必须明确停止标准、预算和阶段汇报，不要假装能无限后台冲浪。",
     }
+    strategy_notes = {
+        "linuxdo-only": "研究策略：只使用 Linux.do，不自动进入 GitHub；如发现项目线索，只记录为可补深挖候选。",
+        "linuxdo-first": "研究策略：Linux.do 为主；只把值得验证的项目、skill、插件、工具、workflow、repo 交给 GitHub 深挖。",
+        "github-first": "研究策略：GitHub 为主；搜索 Linux.do 来补社区反馈，不做全站泛搜。",
+        "github-only": "研究策略：该策略通常不生成 Linux.do 阅读任务；如出现此任务，只记录需要人工确认的社区反馈缺口。",
+    }
     return (
         channel_notes[control_channel]
+        + strategy_notes[research_strategy]
         + "读取首帖和高价值回复，区分事实、观点、争议和行动建议。"
         + f"当前模式：{mode}。不要生成固定日报，只输出本轮任务结果。"
     )
 
 
-def _goal_instructions(mode: str) -> str:
+def _goal_instructions(mode: str, research_strategy: str) -> str:
+    strategy_notes = {
+        "linuxdo-only": "本轮只在 Linux.do 内持续冲浪；GitHub 线索只入队，留给 backfill-plan 或后续 github-plan。",
+        "linuxdo-first": "Linux.do 为主持续冲浪；遇到值得验证的项目、skill、插件、工具、workflow、repo 时，再生成 GitHub 深挖任务。",
+        "github-first": "GitHub 为主；本轮只补 Linux.do 社区反馈，不做 Linux.do 全站泛搜。",
+        "github-only": "本策略通常不使用 /goal 阅读 Linux.do；若生成此任务，只记录社区反馈缺口。",
+    }
     return (
         "用于 /goal 长任务：仍必须使用 Codex 内置浏览器按 next_batch 逐帖阅读 Linux.do，保存每帖摘要、关键证据、工具名、作者、"
         "高价值回复和可继续扩展的引用。活跃老帖必须阅读首帖、关键历史回复和近期回复，不要只看最新回复。"
-        f"当前模式：{mode}。完成停止条件后调用 session 记录本轮结果。"
+        + strategy_notes[research_strategy]
+        + f"当前模式：{mode}。完成停止条件后调用 session 记录本轮结果。"
     )
 
 
@@ -390,6 +419,7 @@ def build_mode_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> d
                 "recent_replies": reading.get("recent_replies", []),
                 "high_value_replies": reading.get("high_value_replies", []),
                 "follow_up_links": reading.get("follow_up_links", []),
+                "github_repos": reading.get("github_repos", []),
                 "confidence": reading.get("confidence", ""),
             }
         )
@@ -427,16 +457,19 @@ def build_github_task(
     next_searches: list[dict[str, Any]],
     max_repos: int,
     max_searches: int,
+    research_strategy: str = "linuxdo-first",
 ) -> dict[str, Any]:
     mode = validate_mode(mode)
+    research_strategy = validate_research_strategy(research_strategy)
     return {
         "mode": mode,
         "control_channel": "github-mcp",
+        "research_strategy": research_strategy,
         "query": query,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "frontier_queue": str(frontier_path),
         "budget": {"max_repos": max_repos, "max_searches": max_searches},
-        "instructions": _github_instructions(mode),
+        "instructions": _github_instructions(mode, research_strategy),
         "next_batch": {
             "repositories": next_repos[:max_repos],
             "searches": next_searches[:max_searches],
@@ -648,6 +681,7 @@ def _add_github_discovery(discovery: dict[str, list[dict[str, Any]]], reading: d
         reading.get("summary", ""),
         reading.get("first_post", ""),
         reading.get("follow_up_links", []),
+        reading.get("github_repos", []),
         reading.get("tools", []),
     ]
     for reply in reading.get("high_value_replies", []) or []:
@@ -973,7 +1007,7 @@ def load_readings(path: Path) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        readings = data.get("readings") or data.get("github_readings") or data.get("topics") or []
+        readings = data.get("readings") or data.get("github_readings") or data.get("items") or data.get("topics") or []
         return readings if isinstance(readings, list) else []
     return []
 
@@ -1070,6 +1104,29 @@ def select_github_research_batch(
     return {"repositories": repos, "searches": searches}
 
 
+def select_github_research_batch_from_discovery(
+    discovery: dict[str, list[dict[str, Any]]],
+    state: dict[str, Any],
+    max_repos: int,
+    max_searches: int,
+) -> dict[str, list[dict[str, Any]]]:
+    frontier = {"discovery_queues": discovery}
+    return select_github_research_batch(frontier, state, max_repos, max_searches)
+
+
+def build_linuxdo_backfill_query(github_items: list[dict[str, Any]]) -> str:
+    values: list[str] = []
+    for item in github_items:
+        repo = _normalize_repo_name(item.get("repo") or item.get("url"))
+        if repo:
+            values.append(repo)
+        values.extend(str(tool).strip() for tool in _field_as_list(item.get("related_tools", [])) if str(tool).strip())
+        source_query = str(item.get("source_query", "")).strip()
+        if source_query:
+            values.append(source_query)
+    return " ".join(_unique(values))
+
+
 def run_plan(args: argparse.Namespace) -> int:
     _validate_positive("max-topics", args.max_topics)
     _validate_positive("max-replies", args.max_replies)
@@ -1094,6 +1151,7 @@ def run_plan(args: argparse.Namespace) -> int:
         args.max_topics,
         args.max_replies,
         args.channel,
+        args.strategy,
     )
     write_json(args.output / f"browser_task_{args.mode}.json", task)
     save_state(args.state, state)
@@ -1129,6 +1187,7 @@ def run_goal_plan(args: argparse.Namespace) -> int:
         next_batch,
         args.max_topics,
         args.max_replies,
+        args.strategy,
     )
     write_json(args.queue, frontier)
     write_json(args.output / f"goal_task_{args.mode}.json", task)
@@ -1180,7 +1239,22 @@ def run_github_plan(args: argparse.Namespace) -> int:
     _validate_positive("max-searches", args.max_searches)
     state = load_state(args.state)
     frontier = load_frontier(args.queue)
-    batch = select_github_research_batch(frontier, state, args.max_repos, args.max_searches)
+    if args.strategy == "github-only" and args.query.strip():
+        batch = {
+            "repositories": [],
+            "searches": [
+                {
+                    "query": args.query.strip(),
+                    "source_tool": args.query.strip(),
+                    "source_topic_ids": [],
+                    "source_urls": [],
+                    "score": 1,
+                    "depth": 1,
+                }
+            ],
+        }
+    else:
+        batch = select_github_research_batch(frontier, state, args.max_repos, args.max_searches)
     task = build_github_task(
         args.mode,
         args.query,
@@ -1189,10 +1263,57 @@ def run_github_plan(args: argparse.Namespace) -> int:
         batch["searches"],
         args.max_repos,
         args.max_searches,
+        research_strategy=args.strategy,
     )
     write_json(args.output / f"github_task_{args.mode}.json", task)
     save_state(args.state, state)
     return 0
+
+
+def run_backfill_plan(args: argparse.Namespace) -> int:
+    source_platform = str(args.source_platform).strip().lower()
+    readings = load_readings(args.input)
+    if source_platform == "linuxdo":
+        _validate_positive("max-repos", args.max_repos)
+        _validate_positive("max-searches", args.max_searches)
+        discovery = extract_discovery_items(readings)
+        merge_discovery_into_frontier(args.queue, discovery)
+        state = load_state(args.state)
+        batch = select_github_research_batch_from_discovery(discovery, state, args.max_repos, args.max_searches)
+        task = build_github_task(
+            args.mode,
+            "",
+            args.queue,
+            batch["repositories"],
+            batch["searches"],
+            args.max_repos,
+            args.max_searches,
+            research_strategy="linuxdo-first",
+        )
+        task["backfill_source"] = "linuxdo"
+        write_json(args.output / f"github_task_{args.mode}.json", task)
+        save_state(args.state, state)
+        return 0
+
+    if source_platform == "github":
+        _validate_positive("max-topics", args.max_topics)
+        query = build_linuxdo_backfill_query(readings)
+        topics = load_topics(args.topics)
+        candidates = rank_topics(topics, mode=args.mode, query=query, limit=args.max_topics) if query else []
+        task = build_browser_task(
+            args.mode,
+            query,
+            candidates=candidates,
+            skill_names=[],
+            max_topics=args.max_topics,
+            max_replies=8,
+            research_strategy="github-first",
+        )
+        task["backfill_source"] = "github"
+        write_json(args.output / f"browser_task_{args.mode}.json", task)
+        return 0
+
+    raise SystemExit(2)
 
 
 def run_github_result(args: argparse.Namespace) -> int:
@@ -1228,6 +1349,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan", help="生成 Codex 内置浏览器阅读任务包。")
     plan.add_argument("--mode", required=True, choices=sorted(MODES))
     plan.add_argument("--channel", choices=sorted(CONTROL_CHANNELS), default=DEFAULT_CONTROL_CHANNEL)
+    plan.add_argument("--strategy", choices=sorted(RESEARCH_STRATEGIES), default=DEFAULT_RESEARCH_STRATEGY)
     plan.add_argument("--query", default="")
     plan.add_argument("--skills", nargs="*", default=[])
     plan.add_argument("--topics", type=Path, default=Path("output/linuxdo_skill_research/topic_details_top220.json"))
@@ -1239,6 +1361,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     goal_plan = subparsers.add_parser("goal-plan", help="生成 Mac /goal 持续冲浪任务包。")
     goal_plan.add_argument("--mode", required=True, choices=sorted(MODES))
+    goal_plan.add_argument("--strategy", choices=sorted(RESEARCH_STRATEGIES), default=DEFAULT_RESEARCH_STRATEGY)
     goal_plan.add_argument("--query", default="")
     goal_plan.add_argument("--skills", nargs="*", default=[])
     goal_plan.add_argument("--topics", type=Path, default=Path("output/linuxdo_skill_research/topic_details_top220.json"))
@@ -1274,6 +1397,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     github_plan = subparsers.add_parser("github-plan", help="从发现队列生成 GitHub 深挖任务包。")
     github_plan.add_argument("--mode", required=True, choices=sorted(MODES))
+    github_plan.add_argument("--strategy", choices=sorted(RESEARCH_STRATEGIES), default="linuxdo-first")
     github_plan.add_argument("--query", default="")
     github_plan.add_argument("--queue", type=Path, default=Path("state/linuxdo_frontier_queue.json"))
     github_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
@@ -1289,16 +1413,40 @@ def build_parser() -> argparse.ArgumentParser:
     github_result.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
     github_result.set_defaults(func=run_github_result)
 
+    backfill_plan = subparsers.add_parser("backfill-plan", help="从单平台结果生成另一平台补深挖任务包。")
+    backfill_plan.add_argument("--source-platform", required=True, choices=["linuxdo", "github"])
+    backfill_plan.add_argument("--mode", required=True, choices=sorted(MODES))
+    backfill_plan.add_argument("--input", type=Path, required=True)
+    backfill_plan.add_argument("--topics", type=Path, default=Path("output/linuxdo_skill_research/topic_details_top220.json"))
+    backfill_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    backfill_plan.add_argument("--queue", type=Path, default=Path("state/linuxdo_frontier_queue.json"))
+    backfill_plan.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    backfill_plan.add_argument("--max-repos", type=int, default=8)
+    backfill_plan.add_argument("--max-searches", type=int, default=5)
+    backfill_plan.add_argument("--max-topics", type=int, default=10)
+    backfill_plan.set_defaults(func=run_backfill_plan)
+
     return parser
 
 
-def _github_instructions(mode: str) -> str:
+def _github_instructions(mode: str, research_strategy: str) -> str:
+    strategy_notes = {
+        "linuxdo-only": "研究策略：通常不需要 GitHub；若生成此任务，只处理 Linux.do 已明确留下的补验证线索。",
+        "linuxdo-first": "研究策略：Linux.do 为主，GitHub 只负责验证和延展已发现的项目线索。",
+        "github-first": "研究策略：GitHub 为主；本轮先找项目证据，后续再用 Linux.do 补社区反馈。",
+        "github-only": "研究策略：只使用 GitHub，不自动回到 Linux.do；如需要社区反馈，另行生成 backfill-plan。",
+    }
+    role_notes = {
+        "github-only": "本任务可直接从用户 query 或指定仓库开始，不需要先有 Linux.do 线索。",
+    }
+    default_role_note = "GitHub 在本策略中作为项目、skill、插件、工具和工作流线索的验证与延展源。"
     return (
         "请使用 GitHub MCP 或 GitHub 官方页面深挖 next_batch 中的仓库和搜索词；"
-        "不要把 GitHub 当作替代 Linux.do 的主阅读源，而是作为项目、skill、插件、工具和工作流线索的验证与延展源。"
-        "每个仓库至少检查 README/描述、最近提交或 release、issue/PR 活跃度、安装或使用成本、与现有工具的重叠、风险和替代方案。"
-        "搜索词应返回值得继续看的仓库候选，不要只按 stars 排序；优先实际可用、近期活跃、与 AI coding/workflow/skill/plugin/MCP 相关的项目。"
-        f"当前模式：{mode}。输出 github_readings JSON，保留推荐等级、confidence、related_repos 和 related_tools。"
+        + strategy_notes[research_strategy]
+        + role_notes.get(research_strategy, default_role_note)
+        + "每个仓库至少检查 README/描述、最近提交或 release、issue/PR 活跃度、安装或使用成本、与现有工具的重叠、风险和替代方案。"
+        + "搜索词应返回值得继续看的仓库候选，不要只按 stars 排序；优先实际可用、近期活跃、与 AI coding/workflow/skill/plugin/MCP 相关的项目。"
+        + f"当前模式：{mode}。输出 github_readings JSON，保留推荐等级、confidence、related_repos 和 related_tools。"
     )
 
 
@@ -1307,6 +1455,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.mode = validate_mode(args.mode) if hasattr(args, "mode") else ""
     args.channel = validate_channel(args.channel) if hasattr(args, "channel") else ""
+    args.strategy = validate_research_strategy(args.strategy) if hasattr(args, "strategy") else ""
     return args.func(args)
 
 

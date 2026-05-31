@@ -34,8 +34,14 @@ Reading is browser-first. Linux.do requires login state, so use Codex 内置浏�
 5. Extract leads from the post and replies: authors, Linux.do links, mentioned tools, skill names, plugins, GitHub repos, workflows, risks, and comparisons.
 6. For `/goal` or this skill's continuous mode, 持续迭代: after every batch, use valuable leads from the current posts to 延展冲浪 into the next batch when they match the user's target. Continue until the budget or stop condition is reached.
 7. Save the batch with `scripts/linuxdo_surf.py session` so read state and discovery queues are preserved.
-8. When repos, projects, skills, plugins, tools, or workflows need validation, generate a GitHub task with `scripts/linuxdo_surf.py github-plan`, inspect with GitHub MCP or official GitHub pages, then save findings with `scripts/linuxdo_surf.py github-result`. See `references/github-research.md`.
-9. If the output should feed the skill-management project, create a skill evidence package. See `references/skill-evidence.md`.
+8. Choose a lightweight platform strategy instead of a heavy parallel hybrid:
+   - `linuxdo-only`: only read Linux.do; save GitHub-looking leads for later.
+   - `github-only`: search or inspect GitHub directly; do not require Linux.do first.
+   - `linuxdo-first`: read Linux.do first, then use GitHub only to verify or extend worthwhile project/tool leads.
+   - `github-first`: inspect GitHub first, then use Linux.do only to backfill community feedback.
+9. When repos, projects, skills, plugins, tools, or workflows need validation, generate a GitHub task with `scripts/linuxdo_surf.py github-plan`, inspect with GitHub MCP or official GitHub pages, then save findings with `scripts/linuxdo_surf.py github-result`. See `references/github-research.md`.
+10. If an older single-platform session/result needs the other platform, use `scripts/linuxdo_surf.py backfill-plan` to create a compact auxiliary task from the saved evidence.
+11. If the output should feed the skill-management project, create a skill evidence package. See `references/skill-evidence.md`.
 
 For self-selected posts or lightweight goldmine searches, read only the requested number of posts and stop with a compact result. Do not invent a next-batch loop unless the user invokes `/goal`, asks to continue until a target, or explicitly requests sustained surfing.
 
@@ -62,12 +68,15 @@ Use `scripts/linuxdo_surf.py` for deterministic state work. It delegates to `too
 ```powershell
 python scripts/linuxdo_surf.py goal-plan --mode goldmine --queue state/linuxdo_frontier_queue.json --state state/linuxdo_surf_state.json
 python scripts/linuxdo_surf.py session --task output/linuxdo_surf/goal_task_goldmine.json --readings output/linuxdo_surf/readings.json --stop-reason "达到本轮深读预算"
-python scripts/linuxdo_surf.py github-plan --mode discover --queue state/linuxdo_frontier_queue.json --state state/linuxdo_surf_state.json
+python scripts/linuxdo_surf.py github-plan --mode discover --strategy linuxdo-first --queue state/linuxdo_frontier_queue.json --state state/linuxdo_surf_state.json
 python scripts/linuxdo_surf.py github-result --task output/linuxdo_surf/github_task_discover.json --readings output/linuxdo_surf/github_readings.json
+python scripts/linuxdo_surf.py github-plan --mode discover --strategy github-only --query "codex workflow skill"
+python scripts/linuxdo_surf.py backfill-plan --source-platform linuxdo --mode discover --input output/linuxdo_surf/mode_result_discover.json
+python scripts/linuxdo_surf.py backfill-plan --source-platform github --mode discover --input output/linuxdo_surf/github_result_discover.json --topics output/linuxdo_skill_research/topic_details_top220.json
 python scripts/linuxdo_surf.py evidence --skills skill-creator --readings output/linuxdo_surf/readings.json
 ```
 
-The script does not replace reading or GitHub inspection. It only ranks candidates, stores sessions, merges discovery queues, generates GitHub task packages, and prevents duplicate work.
+The script does not replace reading or GitHub inspection. It only ranks candidates, stores sessions, merges discovery queues, generates GitHub/backfill task packages, and prevents duplicate work.
 
 ## Output Style
 

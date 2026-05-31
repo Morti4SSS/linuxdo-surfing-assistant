@@ -36,6 +36,16 @@ class LinuxdoSurfTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "未知操控通道"):
             linuxdo_surf.validate_channel("computer-use")
 
+    def test_validate_research_strategy_accepts_lightweight_platform_strategies(self):
+        self.assertEqual(linuxdo_surf.validate_research_strategy("linuxdo-only"), "linuxdo-only")
+        self.assertEqual(linuxdo_surf.validate_research_strategy("github-only"), "github-only")
+        self.assertEqual(linuxdo_surf.validate_research_strategy("linuxdo-first"), "linuxdo-first")
+        self.assertEqual(linuxdo_surf.validate_research_strategy("github-first"), "github-first")
+
+    def test_validate_research_strategy_rejects_heavy_hybrid(self):
+        with self.assertRaisesRegex(ValueError, "未知研究策略"):
+            linuxdo_surf.validate_research_strategy("hybrid")
+
     def test_rank_topics_prefers_query_matches_and_skips_read_ids(self):
         topics = [
             {"id": 1, "title": "普通闲聊", "first_text": "没有重点", "like_count": 50, "reply_count": 20, "views": 1000},
@@ -167,13 +177,16 @@ class LinuxdoSurfTests(unittest.TestCase):
             skill_names=[],
             max_topics=3,
             max_replies=5,
+            research_strategy="linuxdo-first",
         )
 
         self.assertEqual(task["mode"], "research")
+        self.assertEqual(task["research_strategy"], "linuxdo-first")
         self.assertEqual(task["query"], "Codex 工作流")
         self.assertEqual(task["budget"], {"max_topics": 3, "max_replies_per_topic": 5})
         self.assertEqual(task["candidates"][0]["id"], 2)
         self.assertIn("Codex 内置浏览器", task["instructions"])
+        self.assertIn("Linux.do 为主", task["instructions"])
 
     def test_build_browser_task_defaults_to_codex_browser_channel(self):
         task = linuxdo_surf.build_browser_task(
@@ -647,6 +660,53 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual([item["query"] for item in task["next_batch"]["searches"]], ["workflow-kit"])
         self.assertIn("GitHub MCP", task["instructions"])
 
+    def test_cli_github_plan_github_only_uses_query_as_direct_search(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            queue_path = tmp_path / "frontier.json"
+            queue_path.write_text(
+                json.dumps(
+                    {
+                        "queues": {"new": [], "active-old": [], "low-traffic": []},
+                        "discovery_queues": {
+                            "github-repo-research": [
+                                {"repo": "openai/codex", "url": "https://github.com/openai/codex", "score": 5}
+                            ],
+                            "github-search": [{"query": "queued old lead", "score": 1}],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "github-plan",
+                    "--mode",
+                    "discover",
+                    "--strategy",
+                    "github-only",
+                    "--query",
+                    "codex workflow skill",
+                    "--queue",
+                    str(queue_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(tmp_path / "state.json"),
+                ]
+            )
+
+            task = json.loads((out_dir / "github_task_discover.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(task["research_strategy"], "github-only")
+        self.assertEqual(task["next_batch"]["repositories"], [])
+        self.assertEqual([item["query"] for item in task["next_batch"]["searches"]], ["codex workflow skill"])
+        self.assertIn("只使用 GitHub", task["instructions"])
+        self.assertNotIn("替代 Linux.do", task["instructions"])
+
     def test_cli_github_result_updates_state_and_merges_followup_repos(self):
         with TemporaryDirectoryPath() as tmp_path:
             queue_path = tmp_path / "frontier.json"
@@ -779,6 +839,145 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(result["reviewed_github_repos"], ["openai/codex", "acme/workflow-kit"])
         self.assertEqual(result["items"][1]["source_query"], "workflow-kit")
+
+    def test_cli_backfill_plan_from_linuxdo_result_builds_github_task(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            result_path = tmp_path / "mode_result_discover.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "id": 1,
+                                "title": "Codex 工具讨论",
+                                "url": "https://linux.do/t/topic/1",
+                                "summary": "推荐 https://github.com/openai/codex 和 workflow-kit。",
+                                "tools": ["workflow-kit"],
+                                "positive_feedback": ["README 清楚"],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+            queue_path = tmp_path / "frontier.json"
+            queue_path.write_text(
+                json.dumps(
+                    {
+                        "queues": {"new": [], "active-old": [], "low-traffic": []},
+                        "discovery_queues": {
+                            "github-repo-research": [
+                                {"repo": "unrelated/old", "url": "https://github.com/unrelated/old", "score": 9}
+                            ],
+                            "github-search": [{"query": "old queued search", "score": 9}],
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "backfill-plan",
+                    "--source-platform",
+                    "linuxdo",
+                    "--mode",
+                    "discover",
+                    "--input",
+                    str(result_path),
+                    "--output",
+                    str(out_dir),
+                    "--queue",
+                    str(queue_path),
+                    "--max-repos",
+                    "3",
+                    "--max-searches",
+                    "3",
+                ]
+            )
+
+            task = json.loads((out_dir / "github_task_discover.json").read_text(encoding="utf-8"))
+            frontier = json.loads(queue_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(task["research_strategy"], "linuxdo-first")
+        self.assertEqual([item["repo"] for item in task["next_batch"]["repositories"]], ["openai/codex"])
+        self.assertEqual([item["query"] for item in task["next_batch"]["searches"]], ["workflow-kit"])
+        self.assertIn("openai/codex", [item["repo"] for item in frontier["discovery_queues"]["github-repo-research"]])
+
+    def test_cli_backfill_plan_from_github_result_builds_linuxdo_task(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            result_path = tmp_path / "github_result_discover.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "repo": "openai/codex",
+                                "url": "https://github.com/openai/codex",
+                                "summary": "CLI 活跃，需要社区反馈。",
+                                "related_tools": ["Codex CLI"],
+                                "recommendation": "收藏观察",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "out"
+            topics_path = tmp_path / "topics.json"
+            topics_path.write_text(
+                json.dumps(
+                    {
+                        "topics": [
+                            {
+                                "id": 9,
+                                "title": "openai/codex 和 Codex CLI 社区反馈",
+                                "url": "https://linux.do/t/topic/9",
+                                "first_text": "讨论 Codex CLI 使用体验",
+                                "like_count": 3,
+                                "reply_count": 2,
+                                "views": 100,
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "backfill-plan",
+                    "--source-platform",
+                    "github",
+                    "--mode",
+                    "discover",
+                    "--input",
+                    str(result_path),
+                    "--output",
+                    str(out_dir),
+                    "--topics",
+                    str(topics_path),
+                    "--max-topics",
+                    "5",
+                ]
+            )
+
+            task = json.loads((out_dir / "browser_task_discover.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(task["research_strategy"], "github-first")
+        self.assertEqual(task["backfill_source"], "github")
+        self.assertIn("openai/codex", task["query"])
+        self.assertIn("Codex CLI", task["query"])
+        self.assertEqual([item["id"] for item in task["candidates"]], [9])
+        self.assertIn("GitHub 为主", task["instructions"])
+        self.assertIn("搜索 Linux.do", task["instructions"])
 
     def test_cli_plan_rejects_unknown_channel(self):
         with TemporaryDirectoryPath() as tmp_path:

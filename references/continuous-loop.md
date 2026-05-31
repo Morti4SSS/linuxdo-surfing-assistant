@@ -20,6 +20,8 @@ Use this reference when the user invokes `/goal`, asks Codex to keep surfing, or
 8. Report a compact checkpoint: best findings, priority buckets, stop/continue reason, and saved artifact path.
 9. Continue if the goal is not met and the budget allows it.
 
+For `/goal`, prefer one主一辅策略 rather than a broad hybrid loop. Use `linuxdo-only` when the user wants pure community surfing, `linuxdo-first` when Linux.do discoveries should be verified on GitHub, and `github-first` only when GitHub findings need Linux.do community feedback. `github-only` belongs to GitHub tasks, not Linux.do browser reading.
+
 ## Extension Rule
 
 持续迭代 means each batch can reshape the next batch. If a post mentions another Linux.do thread, a tool, an author, a risk, or a comparison that is relevant to the user's target, add it as a lead. Then 延展冲浪 from that lead rather than staying on the original list.
@@ -46,6 +48,8 @@ Stop when one of these is true:
 When stopping, explain the stop reason and what remains in the frontier. Do not present a stop as final truth; present it as the end of the current surf pass.
 
 Before stopping for no harvest, run one adjustment pass: 切换热度排序, 切换最新排序, search 同义词, and inspect previous readings for follow-up links, author names, alternate tool names, or unresolved risks. If that still produces no useful leads, save the session with that stop reason.
+
+If a previous single-platform session/result has useful unresolved leads, run `backfill-plan` instead of rereading everything. This produces one compact auxiliary task from saved evidence and preserves the original lightweight pass.
 
 ## Checkpoint Output
 
