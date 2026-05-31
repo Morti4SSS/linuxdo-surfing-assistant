@@ -22,6 +22,8 @@ Use this reference when the user invokes `/goal`, asks Codex to keep surfing, or
 
 For `/goal`, prefer one主一辅策略 rather than a broad hybrid loop. Use `linuxdo-only` when the user wants pure community surfing, `linuxdo-first` when Linux.do discoveries should be verified on GitHub, and `github-first` only when GitHub findings need Linux.do community feedback. `github-only` belongs to GitHub tasks, not Linux.do browser reading.
 
+When a post depends on screenshots, UI/WebUI/TUI, video, tutorial install steps, workflow diagrams, or aesthetic/layout judgment, mark it for visual review instead of pretending JSON text is enough. Keep the default reading loop JSON-first, but let the queue carry `visual_evidence_needed`, `visual_review_priority`, and `visual_review_status` so a later render pass can pick only the posts that truly need it.
+
 ## Extension Rule
 
 持续迭代 means each batch can reshape the next batch. If a post mentions another Linux.do thread, a tool, an author, a risk, or a comparison that is relevant to the user's target, add it as a lead. Then 延展冲浪 from that lead rather than staying on the original list.
@@ -50,6 +52,8 @@ When stopping, explain the stop reason and what remains in the frontier. Do not 
 Before stopping for no harvest, run one adjustment pass: 切换热度排序, 切换最新排序, search 同义词, and inspect previous readings for follow-up links, author names, alternate tool names, or unresolved risks. If that still produces no useful leads, save the session with that stop reason.
 
 If a previous single-platform session/result has useful unresolved leads, run `backfill-plan` instead of rereading everything. This produces one compact auxiliary task from saved evidence and preserves the original lightweight pass.
+
+If a batch is visually suspicious or visually rich, do not force a full reread. Mark the item, keep the JSON reading, and enqueue a render回看 batch from the saved result/session. The point is to recover visual evidence surgically, not to double the whole surf pass.
 
 ## Checkpoint Output
 

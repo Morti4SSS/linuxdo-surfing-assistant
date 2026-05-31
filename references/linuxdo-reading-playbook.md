@@ -20,6 +20,8 @@ Read in this order:
 
 For active old topics, do not treat the newest reply as the whole story. Capture original context, historical correction, and recent update separately.
 
+If the post is visually meaningful - screenshots, video, UI/WebUI/TUI, cards, diagrams, tutorial install screens, config screenshots, or aesthetic/layout claims - record that it needs a render回看 instead of pretending the JSON summary is enough. The browser pass still starts with text, but the final judgment may require a rendered page.
+
 ## No-Harvest Adjustment
 
 If a batch has no useful discoveries, do not immediately stop unless the budget is exhausted. Try one adjustment pass:
@@ -29,6 +31,7 @@ If a batch has no useful discoveries, do not immediately stop unless the budget 
 - Search 同义词 and related names, for example "skill", "plugin", "插件", "MCP", "workflow", "工作流", "CLI", "Codex", "Claude Code".
 - Revisit previous readings for follow-up links, author names, alternate tool names, and unresolved risks.
 - Deep-search one promising old thread if it contains high-signal replies or repeated tool mentions.
+- For visually rich posts, do a focused render回看 on the saved candidate list rather than rereading the whole batch.
 
 Stop after the adjustment pass if it still produces no high-value leads, and record the stop reason.
 

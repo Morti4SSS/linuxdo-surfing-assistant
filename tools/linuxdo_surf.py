@@ -265,6 +265,7 @@ DEFAULT_STATE = {
     "synced_skill_names": [],
     "reviewed_github_repos": [],
     "reviewed_github_searches": [],
+    "render_checked_topic_ids": [],
 }
 
 
@@ -355,11 +356,13 @@ def _normalize_state(state: dict[str, Any]) -> dict[str, Any]:
     reviewed_searches = _unique(
         [str(item).strip().lower() for item in state.get("reviewed_github_searches", []) if str(item).strip()]
     )
+    render_checked_ids = sorted({int(item) for item in state.get("render_checked_topic_ids", []) if str(item).strip().isdigit()})
     return {
         "read_topic_ids": read_ids,
         "synced_skill_names": synced_names,
         "reviewed_github_repos": reviewed_repos,
         "reviewed_github_searches": reviewed_searches,
+        "render_checked_topic_ids": render_checked_ids,
     }
 
 
@@ -402,6 +405,7 @@ def build_mode_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> d
     items = []
     for reading in readings:
         reading_id = _safe_int(reading.get("id")) or 0
+        visual_review = _visual_review_fields(reading)
         items.append(
             {
                 "id": reading_id,
@@ -421,6 +425,7 @@ def build_mode_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> d
                 "follow_up_links": reading.get("follow_up_links", []),
                 "github_repos": reading.get("github_repos", []),
                 "confidence": reading.get("confidence", ""),
+                **visual_review,
             }
         )
     mode = str(task.get("mode", ""))
@@ -432,6 +437,58 @@ def build_mode_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> d
         "mode_summary": _mode_summary(mode, str(task.get("query", "")), items),
         "items": items,
     }
+
+
+def _visual_review_fields(reading: dict[str, Any]) -> dict[str, Any]:
+    explicit_needed = bool(reading.get("visual_evidence_needed", False))
+    inferred_needed, inferred_reason, inferred_priority = infer_visual_review_need(reading)
+    needed = explicit_needed or inferred_needed
+    status = str(reading.get("visual_review_status") or ("needed" if needed else "not-needed"))
+    return {
+        "visual_evidence_needed": needed,
+        "visual_reason": reading.get("visual_reason") or inferred_reason,
+        "visual_review_priority": reading.get("visual_review_priority") or inferred_priority,
+        "visual_review_status": status,
+        "visual_review_notes": _field_as_list(reading.get("visual_review_notes", [])),
+        "visual_assets": _field_as_list(reading.get("visual_assets", [])),
+    }
+
+
+def infer_visual_review_need(reading: dict[str, Any]) -> tuple[bool, str, str]:
+    haystack = " ".join(
+        [
+            str(reading.get("title", "")),
+            str(reading.get("summary", "")),
+            str(reading.get("first_post", "")),
+            " ".join(str(item) for item in _field_as_list(reading.get("tools", []))),
+            " ".join(str(item) for item in _field_as_list(reading.get("action_items", []))),
+        ]
+    ).lower()
+    high_keywords = [
+        "ui",
+        "webui",
+        "web ui",
+        "tui",
+        "可视化",
+        "状态栏",
+        "卡片",
+        "dashboard",
+        "界面",
+        "审美",
+        "排版",
+    ]
+    medium_keywords = ["安装", "配置", "教程", "命令输出", "workflow", "工作流", "多 agent", "multi-agent", "编排"]
+    asset_keywords = ["截图", "图片", "视频"]
+    for keyword in high_keywords:
+        if keyword in haystack:
+            return True, f"命中视觉证据关键词：{keyword}", "high"
+    for keyword in medium_keywords:
+        if keyword in haystack:
+            return True, f"命中教程/流程视觉关键词：{keyword}", "medium"
+    for keyword in asset_keywords:
+        if keyword in haystack:
+            return True, f"命中视觉素材关键词：{keyword}", "high"
+    return False, "", "low"
 
 
 def build_session_record(task: dict[str, Any], readings: list[dict[str, Any]], stop_reason: str) -> dict[str, Any]:
@@ -475,6 +532,56 @@ def build_github_task(
             "searches": next_searches[:max_searches],
         },
     }
+
+
+def build_visual_review_task(
+    readings: list[dict[str, Any]],
+    state: dict[str, Any],
+    max_topics: int,
+) -> dict[str, Any]:
+    _validate_positive("max-topics", max_topics)
+    checked_ids = set(state.get("render_checked_topic_ids", []))
+    candidates = []
+    for reading in readings:
+        visual = _visual_review_fields(reading)
+        reading_id = _safe_int(reading.get("id")) or 0
+        if not visual["visual_evidence_needed"]:
+            continue
+        if visual["visual_review_status"] == "checked" or reading_id in checked_ids:
+            continue
+        candidates.append(
+            {
+                "id": reading_id,
+                "title": reading.get("title", ""),
+                "url": reading.get("url", ""),
+                "summary": reading.get("summary", ""),
+                "visual_reason": visual["visual_reason"],
+                "visual_review_priority": visual["visual_review_priority"],
+                "visual_assets": visual["visual_assets"],
+            }
+        )
+    candidates.sort(key=lambda item: (_visual_priority_rank(item["visual_review_priority"]), item["id"]))
+    return {
+        "task_type": "visual-review",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "budget": {"max_topics": max_topics},
+        "instructions": _visual_review_instructions(),
+        "items": candidates[:max_topics],
+    }
+
+
+def _visual_review_instructions() -> str:
+    return (
+        "Use Codex browser to open each Linux.do rendered page with logged-in state. "
+        "Do not treat existing JSON readings as proof that render review is complete. "
+        "Check screenshots, images, videos, UI/WebUI/TUI, tutorial steps, command output, workflow diagrams, cards, layout, and aesthetic claims. "
+        "Write findings back into visual_evidence_needed, visual_review_status, visual_review_notes, and visual_assets."
+    )
+
+
+def _visual_priority_rank(priority: str) -> int:
+    ranks = {"high": 0, "medium": 1, "low": 2}
+    return ranks.get(str(priority).lower(), 3)
 
 
 def build_github_result(task: dict[str, Any], github_readings: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1215,6 +1322,7 @@ def run_result(args: argparse.Namespace) -> int:
     write_json(args.output / f"mode_result_{mode}.json", result)
     state = load_state(args.state)
     state["read_topic_ids"] = state["read_topic_ids"] + result["read_topic_ids"]
+    state["render_checked_topic_ids"] = state["render_checked_topic_ids"] + _render_checked_ids(result["items"])
     save_state(args.state, state)
     return 0
 
@@ -1227,6 +1335,7 @@ def run_session(args: argparse.Namespace) -> int:
     write_json(_next_session_path(args.output, mode), session)
     state = load_state(args.state)
     state["read_topic_ids"] = state["read_topic_ids"] + session["read_topic_ids"]
+    state["render_checked_topic_ids"] = state["render_checked_topic_ids"] + _render_checked_ids(session["items"])
     save_state(args.state, state)
     frontier_path = str(task.get("frontier_queue", "")).strip()
     if frontier_path:
@@ -1314,6 +1423,15 @@ def run_backfill_plan(args: argparse.Namespace) -> int:
         return 0
 
     raise SystemExit(2)
+
+
+def run_visual_review_plan(args: argparse.Namespace) -> int:
+    readings = load_readings(args.input)
+    state = load_state(args.state)
+    task = build_visual_review_task(readings, state, args.max_topics)
+    write_json(args.output / "visual_review_task.json", task)
+    save_state(args.state, state)
+    return 0
 
 
 def run_github_result(args: argparse.Namespace) -> int:
@@ -1426,6 +1544,13 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_plan.add_argument("--max-topics", type=int, default=10)
     backfill_plan.set_defaults(func=run_backfill_plan)
 
+    visual_review_plan = subparsers.add_parser("visual-review-plan", help="从阅读结果生成需要渲染页回看的任务包。")
+    visual_review_plan.add_argument("--input", type=Path, required=True)
+    visual_review_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    visual_review_plan.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    visual_review_plan.add_argument("--max-topics", type=int, default=10)
+    visual_review_plan.set_defaults(func=run_visual_review_plan)
+
     return parser
 
 
@@ -1503,6 +1628,14 @@ def _flatten_items(items: list[dict[str, Any]], field: str) -> list[str]:
             raw = [raw]
         values.extend(str(value) for value in raw if str(value).strip())
     return _unique(values)
+
+
+def _render_checked_ids(items: list[dict[str, Any]]) -> list[int]:
+    return [
+        item_id
+        for item_id in (_safe_int(item.get("id")) for item in items if item.get("visual_review_status") == "checked")
+        if item_id is not None
+    ]
 
 
 def _safe_int(value: Any) -> int | None:

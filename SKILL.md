@@ -41,7 +41,8 @@ Reading is browser-first. Linux.do requires login state, so use Codex 内置浏�
    - `github-first`: inspect GitHub first, then use Linux.do only to backfill community feedback.
 9. When repos, projects, skills, plugins, tools, or workflows need validation, generate a GitHub task with `scripts/linuxdo_surf.py github-plan`, inspect with GitHub MCP or official GitHub pages, then save findings with `scripts/linuxdo_surf.py github-result`. See `references/github-research.md`.
 10. If an older single-platform session/result needs the other platform, use `scripts/linuxdo_surf.py backfill-plan` to create a compact auxiliary task from the saved evidence.
-11. If the output should feed the skill-management project, create a skill evidence package. See `references/skill-evidence.md`.
+11. When a post depends on screenshots, UI/WebUI/TUI, videos, tutorial install/config screens, workflow diagrams, cards, layout, or aesthetic judgment, mark it in the reading record with `visual_evidence_needed` and route it to `scripts/linuxdo_surf.py visual-review-plan` instead of assuming the JSON reading is enough.
+12. If the output should feed the skill-management project, create a skill evidence package. See `references/skill-evidence.md`.
 
 For self-selected posts or lightweight goldmine searches, read only the requested number of posts and stop with a compact result. Do not invent a next-batch loop unless the user invokes `/goal`, asks to continue until a target, or explicitly requests sustained surfing.
 
@@ -73,6 +74,7 @@ python scripts/linuxdo_surf.py github-result --task output/linuxdo_surf/github_t
 python scripts/linuxdo_surf.py github-plan --mode discover --strategy github-only --query "codex workflow skill"
 python scripts/linuxdo_surf.py backfill-plan --source-platform linuxdo --mode discover --input output/linuxdo_surf/mode_result_discover.json
 python scripts/linuxdo_surf.py backfill-plan --source-platform github --mode discover --input output/linuxdo_surf/github_result_discover.json --topics output/linuxdo_skill_research/topic_details_top220.json
+python scripts/linuxdo_surf.py visual-review-plan --input output/linuxdo_surf/mode_result_discover.json --state state/linuxdo_surf_state.json
 python scripts/linuxdo_surf.py evidence --skills skill-creator --readings output/linuxdo_surf/readings.json
 ```
 

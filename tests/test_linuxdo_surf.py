@@ -137,6 +137,7 @@ class LinuxdoSurfTests(unittest.TestCase):
                 "synced_skill_names": [],
                 "reviewed_github_repos": [],
                 "reviewed_github_searches": [],
+                "render_checked_topic_ids": [],
             },
         )
 
@@ -291,6 +292,41 @@ class LinuxdoSurfTests(unittest.TestCase):
 
         self.assertEqual(result["mode_summary"]["new_candidates"], ["workflow-kit"])
         self.assertEqual(result["mode_summary"]["needs_github_verification"], ["workflow-kit"])
+
+    def test_build_mode_result_marks_visual_review_candidates_and_preserves_explicit_fields(self):
+        task = {"mode": "discover", "query": "", "candidates": []}
+        readings = [
+            {
+                "id": 5,
+                "title": "Codex WebUI 预览",
+                "summary": "截图展示状态栏和布局。",
+                "visual_evidence_needed": True,
+                "visual_reason": "UI 截图",
+                "visual_review_status": "needed",
+                "visual_review_notes": ["要看渲染页"],
+                "visual_assets": ["screenshot: status bar"],
+            },
+            {
+                "id": 6,
+                "title": "安装教程",
+                "summary": "配置步骤和命令输出截图。",
+            },
+        ]
+
+        result = linuxdo_surf.build_mode_result(task, readings)
+
+        first = result["items"][0]
+        second = result["items"][1]
+
+        self.assertTrue(first["visual_evidence_needed"])
+        self.assertEqual(first["visual_reason"], "UI 截图")
+        self.assertEqual(first["visual_review_status"], "needed")
+        self.assertEqual(first["visual_review_notes"], ["要看渲染页"])
+        self.assertEqual(first["visual_assets"], ["screenshot: status bar"])
+        self.assertTrue(second["visual_evidence_needed"])
+        self.assertEqual(second["visual_review_status"], "needed")
+        self.assertIn("安装", second["visual_reason"])
+        self.assertEqual(second["visual_review_priority"], "medium")
 
     def test_build_skill_evidence_package_extracts_matching_skill_feedback(self):
         readings = [
@@ -978,6 +1014,133 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in task["candidates"]], [9])
         self.assertIn("GitHub 为主", task["instructions"])
         self.assertIn("搜索 Linux.do", task["instructions"])
+
+    def test_cli_visual_review_plan_selects_needed_unchecked_items(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            result_path = tmp_path / "mode_result_discover.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "mode": "discover",
+                        "query": "visual review",
+                        "items": [
+                            {
+                                "id": 21,
+                                "title": "WebUI 预览",
+                                "url": "https://linux.do/t/topic/21",
+                                "summary": "UI 截图和状态栏。",
+                            },
+                            {
+                                "id": 22,
+                                "title": "安装教程",
+                                "url": "https://linux.do/t/topic/22",
+                                "summary": "配置步骤和命令输出截图。",
+                            },
+                            {
+                                "id": 23,
+                                "title": "已核验 UI",
+                                "url": "https://linux.do/t/topic/23",
+                                "summary": "界面截图。",
+                                "visual_evidence_needed": True,
+                                "visual_review_status": "checked",
+                            },
+                            {
+                                "id": 24,
+                                "title": "已入库但未回看",
+                                "url": "https://linux.do/t/topic/24",
+                                "summary": "UI 截图。",
+                                "visual_evidence_needed": True,
+                            },
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            state_path = tmp_path / "state.json"
+            state_path.write_text(json.dumps({"render_checked_topic_ids": [24]}), encoding="utf-8")
+            out_dir = tmp_path / "out"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "visual-review-plan",
+                    "--input",
+                    str(result_path),
+                    "--state",
+                    str(state_path),
+                    "--output",
+                    str(out_dir),
+                    "--max-topics",
+                    "5",
+                ]
+            )
+
+            task = json.loads((out_dir / "visual_review_task.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([item["id"] for item in task["items"]], [21, 22])
+        self.assertEqual(task["items"][0]["visual_review_priority"], "high")
+        self.assertEqual(task["items"][1]["visual_review_priority"], "medium")
+        self.assertIn("rendered page", task["instructions"])
+        self.assertIn("visual_evidence_needed", task["instructions"])
+
+    def test_cli_result_records_render_checked_ids_in_state(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            task_path = tmp_path / "mode_task_discover.json"
+            task_path.write_text(
+                json.dumps(
+                    {
+                        "mode": "discover",
+                        "query": "visual review",
+                        "candidates": [{"id": 31, "title": "UI 工具", "url": "https://linux.do/t/topic/31"}],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            readings_path = tmp_path / "readings.json"
+            readings_path.write_text(
+                json.dumps(
+                    {
+                        "readings": [
+                            {
+                                "id": 31,
+                                "title": "UI 工具",
+                                "url": "https://linux.do/t/topic/31",
+                                "summary": "已看过渲染页。",
+                                "visual_evidence_needed": True,
+                                "visual_review_status": "checked",
+                                "visual_review_notes": ["确认了卡片布局"],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            state_path = tmp_path / "state.json"
+            out_dir = tmp_path / "out"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "result",
+                    "--task",
+                    str(task_path),
+                    "--readings",
+                    str(readings_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(state_path),
+                ]
+            )
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            result = json.loads((out_dir / "mode_result_discover.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(state["render_checked_topic_ids"], [31])
+        self.assertEqual(result["items"][0]["visual_review_status"], "checked")
 
     def test_cli_plan_rejects_unknown_channel(self):
         with TemporaryDirectoryPath() as tmp_path:
