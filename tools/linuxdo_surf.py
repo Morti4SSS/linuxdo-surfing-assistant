@@ -13,6 +13,7 @@ if __package__ in {None, ""}:
 
 from tools.linuxdo_knowledge.config import load_config
 from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+from tools.linuxdo_knowledge.session import ingest_session
 from tools.linuxdo_knowledge.state import ensure_knowledge_state
 from tools.linuxdo_knowledge.strategy import build_knowledge_task
 
@@ -372,6 +373,15 @@ def run_knowledge_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_knowledge_session(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    task = json.loads(args.task.read_text(encoding="utf-8"))
+    readings = json.loads(args.readings.read_text(encoding="utf-8"))
+    result = ingest_session(config, task=task, readings=readings, batch_id=args.batch_id)
+    write_json(args.output, result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Linux.do 任务型冲浪工具。")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -416,6 +426,14 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_plan.add_argument("--batch-size", type=int, default=20)
     knowledge_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/knowledge_task_latest.json"))
     knowledge_plan.set_defaults(func=run_knowledge_plan)
+
+    knowledge_session = subparsers.add_parser("knowledge-session", help="写入一批冲浪结果到机器状态和 Obsidian。")
+    knowledge_session.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    knowledge_session.add_argument("--task", type=Path, required=True)
+    knowledge_session.add_argument("--readings", type=Path, required=True)
+    knowledge_session.add_argument("--batch-id", default="001")
+    knowledge_session.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/knowledge_session_result.json"))
+    knowledge_session.set_defaults(func=run_knowledge_session)
 
     return parser
 

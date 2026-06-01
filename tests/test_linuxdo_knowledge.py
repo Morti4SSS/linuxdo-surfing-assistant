@@ -876,3 +876,393 @@ class ReadingStrategyTests(unittest.TestCase):
         self.assertIn("unchanged", task["items"][0]["skip_reason"])
         self.assertEqual(task["items"][1]["reading_level"], 2)
         self.assertEqual(task["items"][1]["action"], "read_incremental")
+
+
+class SessionIngestionTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=None,
+            fallback_bookmark_path=None,
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def test_ingest_session_updates_state_and_writes_obsidian_pages(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            task = {
+                "created_at": "2026-06-01T12:00:00+00:00",
+                "items": [
+                    {
+                        "topic_id": 123,
+                        "title": "Codex workflow",
+                        "url": "https://linux.do/t/topic/123",
+                    }
+                ],
+            }
+            readings = {
+                "readings": [
+                    {
+                        "topic_id": 123,
+                        "title": "Codex workflow",
+                        "url": "https://linux.do/t/topic/123",
+                        "summary": "讨论长任务上下文预算。",
+                        "value_level": "high",
+                        "tags": ["workflow"],
+                        "reply_count": 12,
+                        "last_activity_at": "2026-06-01T11:00:00+00:00",
+                        "highest_post_number": 18,
+                        "highest_post_id": 98765,
+                        "read_ranges": [{"from": 1, "to": 18}],
+                        "content_fingerprint": "topic-fingerprint-1",
+                        "resources": [
+                            {
+                                "id": "candidate:codex-workflow",
+                                "name": "Codex Workflow",
+                                "status": "candidate",
+                                "capture_reason": "多人讨论上下文预算。",
+                                "summary": "这段长摘要不应该进入热索引。" * 20,
+                                "evidence": ["长证据不进入热索引"],
+                            }
+                        ],
+                        "claims": [
+                            {
+                                "id": "claim:context-budget",
+                                "text": "长任务需要轻量索引",
+                                "summary": "长 claim 解释也不应该进入热索引。" * 20,
+                            }
+                        ],
+                        "evidence": [
+                            {
+                                "summary": "回复支持只读新增楼层。",
+                                "evidence_status": "supporting",
+                            }
+                        ],
+                        "comparisons": [
+                            {
+                                "id": "comparison:workflow-tools",
+                                "name": "Workflow Tools",
+                                "summary": "按 token 成本和反馈闭环比较。",
+                            }
+                        ],
+                        "workflows": [
+                            {
+                                "id": "workflow:linuxdo-obsidian",
+                                "name": "Linux.do Obsidian Workflow",
+                                "summary": "冲浪后写入 Obsidian。",
+                            }
+                        ],
+                        "knowledge_drafts": [
+                            {
+                                "id": "draft:lightweight-index",
+                                "name": "轻量索引",
+                                "summary": "热索引降低重复读取成本。",
+                            }
+                        ],
+                        "categories": [
+                            {
+                                "id": "category:skills",
+                                "name": "skills",
+                                "items": ["Codex Workflow"],
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            result = ingest_session(
+                config,
+                task=task,
+                readings=readings,
+                batch_id="001",
+                observed_at="2026-06-01T12:30:00+00:00",
+            )
+            indexes = load_hot_indexes(config)
+            session_path = config.obsidian_vault_path / "inbox" / "sessions" / "2026-06-01-batch-001.md"
+            candidate_path = config.obsidian_vault_path / "catalog" / "candidates" / "Codex-Workflow.md"
+            comparison_path = config.obsidian_vault_path / "catalog" / "comparisons" / "Workflow-Tools.md"
+            workflow_path = config.obsidian_vault_path / "catalog" / "workflows" / "Linux.do-Obsidian-Workflow.md"
+            draft_path = config.obsidian_vault_path / "wiki" / "drafts" / "轻量索引.md"
+            category_path = config.obsidian_vault_path / "catalog" / "categories" / "skills.md"
+            evidence_path = config.state_root / "evidence_shards" / "2026-06.jsonl"
+            session_exists = session_path.exists()
+            session_text = session_path.read_text(encoding="utf-8") if session_exists else ""
+            candidate_exists = candidate_path.exists()
+            candidate_text = candidate_path.read_text(encoding="utf-8") if candidate_exists else ""
+            comparison_exists = comparison_path.exists()
+            workflow_exists = workflow_path.exists()
+            draft_exists = draft_path.exists()
+            category_exists = category_path.exists()
+            evidence_text = evidence_path.read_text(encoding="utf-8") if evidence_path.exists() else ""
+
+        self.assertEqual(result["readings"], 1)
+        self.assertIn("123", indexes["topic_index"]["topics"])
+        self.assertEqual(indexes["topic_update_state"]["topics"]["123"]["read_reply_count"], 12)
+        self.assertEqual(indexes["topic_update_state"]["topics"]["123"]["highest_post_number"], 18)
+        self.assertEqual(indexes["topic_update_state"]["topics"]["123"]["highest_post_id"], 98765)
+        self.assertEqual(indexes["topic_update_state"]["topics"]["123"]["read_ranges"], [{"from": 1, "to": 18}])
+        self.assertEqual(indexes["topic_update_state"]["topics"]["123"]["content_fingerprint"], "topic-fingerprint-1")
+        self.assertIn("candidate:codex-workflow", indexes["resource_index"]["resources"])
+        self.assertNotIn("summary", indexes["resource_index"]["resources"]["candidate:codex-workflow"])
+        self.assertNotIn("evidence", indexes["resource_index"]["resources"]["candidate:codex-workflow"])
+        self.assertIn("claim:context-budget", indexes["claim_index"]["claims"])
+        self.assertNotIn("summary", indexes["claim_index"]["claims"]["claim:context-budget"])
+        self.assertTrue(session_exists)
+        self.assertIn("Codex workflow", session_text)
+        self.assertTrue(candidate_exists)
+        self.assertIn("## 为什么被抓到", candidate_text)
+        self.assertTrue(comparison_exists)
+        self.assertTrue(workflow_exists)
+        self.assertTrue(draft_exists)
+        self.assertTrue(category_exists)
+        self.assertIn("只读新增楼层", evidence_text)
+
+    def test_knowledge_session_cli_writes_result_file(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "obsidian_vault_path": str(config.obsidian_vault_path),
+                        "state_root": str(config.state_root),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            task_path = tmp_path / "task.json"
+            readings_path = tmp_path / "readings.json"
+            output_path = tmp_path / "result.json"
+            task_path.write_text(json.dumps({"items": []}), encoding="utf-8")
+            readings_path.write_text(json.dumps({"readings": []}), encoding="utf-8")
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "knowledge-session",
+                    "--config",
+                    str(config_path),
+                    "--task",
+                    str(task_path),
+                    "--readings",
+                    str(readings_path),
+                    "--batch-id",
+                    "002",
+                    "--output",
+                    str(output_path),
+                ]
+            )
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result, {"readings": 0})
+
+    def test_ingest_session_updates_existing_obsidian_page_by_frontmatter_id(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            existing_path = config.obsidian_vault_path / "catalog" / "archive" / "Human-Renamed.md"
+            existing_path.parent.mkdir(parents=True)
+            existing_path.write_text(
+                "---\nid: \"candidate:codex-workflow\"\ntype: candidate\nstatus: candidate\n---\n\n"
+                "# Human Renamed\n\n## 旧区块\n\n旧内容\n\n## 我的反馈\n\n人写的反馈\n",
+                encoding="utf-8",
+            )
+            readings = {
+                "readings": [
+                    {
+                        "topic_id": 123,
+                        "title": "Codex workflow",
+                        "url": "https://linux.do/t/topic/123",
+                        "resources": [
+                            {
+                                "id": "candidate:codex-workflow",
+                                "name": "Codex Workflow New Name",
+                                "status": "candidate",
+                                "capture_reason": "新证据。",
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            ingest_session(config, task={"items": []}, readings=readings, batch_id="003", observed_at="2026-06-01T12:30:00+00:00")
+            existing_text = existing_path.read_text(encoding="utf-8")
+            duplicate_path_exists = (config.obsidian_vault_path / "catalog" / "candidates" / "Codex-Workflow-New-Name.md").exists()
+
+        self.assertIn("# Codex Workflow New Name", existing_text)
+        self.assertIn("新证据", existing_text)
+        self.assertIn("## 我的反馈\n\n人写的反馈\n", existing_text)
+        self.assertFalse(duplicate_path_exists)
+
+    def test_ingest_session_sparse_updates_preserve_hot_index_state(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes, save_hot_index
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            save_hot_index(
+                config,
+                "topic_index",
+                {
+                    "topics": {
+                        "123": {
+                            "topic_id": 123,
+                            "title": "Codex workflow",
+                            "url": "https://linux.do/t/topic/123",
+                            "status": "active",
+                            "watchlist": True,
+                            "value_level": "high",
+                            "resource_ids": ["candidate:codex-workflow"],
+                            "claim_ids": ["claim:context-budget"],
+                        }
+                    }
+                },
+            )
+            save_hot_index(
+                config,
+                "topic_update_state",
+                {
+                    "topics": {
+                        "123": {
+                            "topic_id": 123,
+                            "highest_post_number": 18,
+                            "highest_post_id": 98765,
+                            "read_ranges": [{"from": 1, "to": 18}],
+                            "content_fingerprint": "topic-fingerprint-1",
+                        }
+                    }
+                },
+            )
+            save_hot_index(
+                config,
+                "resource_index",
+                {
+                    "resources": {
+                        "candidate:codex-workflow": {
+                            "id": "candidate:codex-workflow",
+                            "name": "Codex Workflow",
+                            "github_url": "https://github.com/example/workflow",
+                            "category": "skill",
+                            "evidence_status": "supporting",
+                        }
+                    }
+                },
+            )
+            save_hot_index(
+                config,
+                "claim_index",
+                {
+                    "claims": {
+                        "claim:context-budget": {
+                            "id": "claim:context-budget",
+                            "text": "长任务需要轻量索引",
+                            "evidence_status": "supporting",
+                        }
+                    }
+                },
+            )
+
+            ingest_session(
+                config,
+                task={"items": []},
+                readings={
+                    "readings": [
+                        {
+                            "topic_id": 123,
+                            "title": "Codex workflow",
+                            "reply_count": 19,
+                            "resources": [{"id": "candidate:codex-workflow", "name": "Codex Workflow"}],
+                            "claims": [{"id": "claim:context-budget", "text": "长任务需要轻量索引"}],
+                        }
+                    ]
+                },
+                batch_id="004",
+                observed_at="2026-06-01T12:30:00+00:00",
+            )
+            indexes = load_hot_indexes(config)
+            topic_index_state = indexes["topic_index"]["topics"]["123"]
+            topic_state = indexes["topic_update_state"]["topics"]["123"]
+            resource_state = indexes["resource_index"]["resources"]["candidate:codex-workflow"]
+            claim_state = indexes["claim_index"]["claims"]["claim:context-budget"]
+
+        self.assertTrue(topic_index_state["watchlist"])
+        self.assertEqual(topic_index_state["status"], "active")
+        self.assertEqual(topic_index_state["value_level"], "high")
+        self.assertEqual(topic_index_state["url"], "https://linux.do/t/topic/123")
+        self.assertEqual(topic_index_state["resource_ids"], ["candidate:codex-workflow"])
+        self.assertEqual(topic_index_state["claim_ids"], ["claim:context-budget"])
+        self.assertEqual(topic_state["read_reply_count"], 19)
+        self.assertEqual(topic_state["highest_post_number"], 18)
+        self.assertEqual(topic_state["highest_post_id"], 98765)
+        self.assertEqual(topic_state["read_ranges"], [{"from": 1, "to": 18}])
+        self.assertEqual(topic_state["content_fingerprint"], "topic-fingerprint-1")
+        self.assertEqual(resource_state["github_url"], "https://github.com/example/workflow")
+        self.assertEqual(resource_state["category"], "skill")
+        self.assertEqual(resource_state["evidence_status"], "supporting")
+        self.assertEqual(claim_state["evidence_status"], "supporting")
+
+    def test_ingest_session_ignores_corrupt_legacy_readings_all(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            legacy_path = config.state_root / "readings_all.json"
+            legacy_path.parent.mkdir(parents=True)
+            legacy_path.write_text("{not valid json", encoding="utf-8")
+
+            result = ingest_session(
+                config,
+                task={"items": []},
+                readings={"readings": []},
+                batch_id="004",
+                observed_at="2026-06-01T12:30:00+00:00",
+            )
+
+        self.assertEqual(result, {"readings": 0})
+
+    def test_ingest_session_accepts_topics_readings_shape_and_corrupt_hot_indexes(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            config.state_root.mkdir(parents=True)
+            for name in ("topic_index", "topic_update_state", "resource_index", "claim_index"):
+                (config.state_root / f"{name}.json").write_text("[]", encoding="utf-8")
+
+            result = ingest_session(
+                config,
+                task=[],
+                readings={
+                    "topics": [
+                        {
+                            "topic_id": 123,
+                            "title": "topics shape",
+                            "url": "https://linux.do/t/topic/123",
+                            "resources": [{"id": "candidate:tool", "name": "Tool"}],
+                        }
+                    ]
+                },
+                batch_id="005",
+                observed_at="2026-06-01T12:30:00+00:00",
+            )
+            topic_index = json.loads((config.state_root / "topic_index.json").read_text(encoding="utf-8"))
+            candidate_text = (
+                config.obsidian_vault_path / "catalog" / "candidates" / "Tool.md"
+            ).read_text(encoding="utf-8")
+
+        self.assertEqual(result, {"readings": 1})
+        self.assertIn("123", topic_index["topics"])
+        self.assertIn("status: candidate", candidate_text)

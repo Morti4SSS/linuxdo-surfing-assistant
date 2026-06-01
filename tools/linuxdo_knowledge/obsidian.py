@@ -94,6 +94,39 @@ def page_path_for(config: Any, page_type: str, name: str) -> Path:
     return config.obsidian_vault_path / PAGE_TYPE_DIRECTORIES[page_type] / f"{safe_filename(name)}.md"
 
 
+def page_path_for_id(config: Any, page_type: str, item_id: str, fallback_name: str) -> Path:
+    if page_type not in PAGE_TYPE_DIRECTORIES:
+        raise ValueError(f"unknown page type: {page_type}")
+    directory = config.obsidian_vault_path / PAGE_TYPE_DIRECTORIES[page_type]
+    existing = find_page_by_frontmatter_id(config.obsidian_vault_path, item_id)
+    return existing if existing else directory / f"{safe_filename(fallback_name)}.md"
+
+
+def find_page_by_frontmatter_id(directory: Path, item_id: str) -> Path | None:
+    if not directory.exists():
+        return None
+    for path in sorted(directory.rglob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        if _frontmatter_id(text) == item_id:
+            return path
+    return None
+
+
+def _frontmatter_id(text: str) -> str | None:
+    if not text.startswith("---\n"):
+        return None
+    end = text.find("\n---", 4)
+    if end == -1:
+        return None
+    for line in text[4:end].splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        if key.strip() == "id":
+            return value.strip().strip("\"'")
+    return None
+
+
 def safe_filename(name: str) -> str:
     cleaned = re.sub(r'[\\/:*?"<>|]+', " ", name)
     cleaned = re.sub(r"\s+", "-", cleaned).strip("-. ")
