@@ -117,6 +117,11 @@ python3 tools/linuxdo_surf.py knowledge-maintain --config config/knowledge_sourc
 - 早期 CLI 设计：[Linux.do 冲浪工具设计](docs/linuxdo-surfing-tool-design.md)
 - Obsidian 知识库设计：[Linux.do 冲浪到 Obsidian 知识库设计](docs/superpowers/specs/2026-06-01-linuxdo-obsidian-knowledge-vault-design.md)
 - Obsidian 知识库实现计划：[Linux.do Obsidian Knowledge Vault Implementation Plan](docs/superpowers/plans/2026-06-01-linuxdo-obsidian-knowledge-vault.md)
+- 本地配置说明：[Local Setup](docs/local-setup.md)
+- Linux.do 阅读策略：[Linux.do Reading Playbook](references/linuxdo-reading-playbook.md)
+- 连续冲浪循环：[Continuous Loop](references/continuous-loop.md)
+- GitHub 验证策略：[GitHub Research](references/github-research.md)
+- 阅读记录结构：[Reading Schema](references/reading-schema.md)
 
 ## 开发状态
 
