@@ -1419,3 +1419,96 @@ class FeedbackSyncTests(unittest.TestCase):
         self.assertEqual(result, {"changed_files": 1})
         self.assertEqual(indexes["user_feedback"]["items"][0]["feedback"], "恢复同步")
         self.assertEqual(indexes["resource_index"]["resources"]["resource:tool"]["status"], "active")
+
+
+class StateMaintenanceTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=None,
+            fallback_bookmark_path=None,
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def test_maintenance_deprioritizes_repeated_low_value_topics_without_loading_legacy_history(self):
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes, maintain_state, save_hot_index
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            (config.state_root / "readings_all.json").write_text("{not valid json", encoding="utf-8")
+            save_hot_index(
+                config,
+                "topic_index",
+                {
+                    "topics": {
+                        "1": {
+                            "topic_id": 1,
+                            "title": "低价值列表",
+                            "url": "https://linux.do/t/topic/1",
+                            "status": "active",
+                            "skip_count": 3,
+                            "skip_reason": "纯列表收集，没有实测",
+                        },
+                        "2": {
+                            "topic_id": 2,
+                            "title": "还不该归档",
+                            "status": "active",
+                            "skip_count": 2,
+                            "skip_reason": "证据不足",
+                        },
+                    }
+                },
+            )
+
+            result = maintain_state(config, maintained_at="2026-06-01T12:00:00+00:00")
+            indexes = load_hot_indexes(config)
+            archive_log = config.state_root / "archive" / "maintenance-2026-06-01.jsonl"
+            archive_page = config.obsidian_vault_path / "catalog" / "archive" / "低价值列表.md"
+            archive_log_exists = archive_log.exists()
+            archive_page_exists = archive_page.exists()
+            archive_text = archive_page.read_text(encoding="utf-8") if archive_page.exists() else ""
+
+        self.assertEqual(result["deprioritized_topics"], 1)
+        self.assertEqual(indexes["topic_index"]["topics"]["1"]["status"], "deprioritized")
+        self.assertEqual(indexes["topic_index"]["topics"]["2"]["status"], "active")
+        self.assertTrue(archive_log_exists)
+        self.assertTrue(archive_page_exists)
+        self.assertIn("纯列表收集，没有实测", archive_text)
+        self.assertIn("https://linux.do/t/topic/1", archive_text)
+
+    def test_knowledge_maintain_cli_writes_result_file(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "obsidian_vault_path": str(config.obsidian_vault_path),
+                        "state_root": str(config.state_root),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            output_path = tmp_path / "maintain.json"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "knowledge-maintain",
+                    "--config",
+                    str(config_path),
+                    "--output",
+                    str(output_path),
+                ]
+            )
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result, {"deprioritized_topics": 0})

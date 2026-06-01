@@ -126,6 +126,61 @@ def append_evidence(config: KnowledgeConfig, evidence: dict[str, Any], observed_
     return path
 
 
+def maintain_state(config: KnowledgeConfig, maintained_at: str | None = None) -> dict[str, int]:
+    from .obsidian import page_path_for, scaffold_vault, write_page
+
+    maintained = maintained_at or now_iso()
+    scaffold_vault(config)
+    indexes = load_hot_indexes(config)
+    topic_index = indexes.get("topic_index", {})
+    topics = topic_index.get("topics", {}) if isinstance(topic_index, dict) else {}
+    if not isinstance(topics, dict):
+        topics = {}
+        topic_index = {"topics": topics}
+
+    changed = 0
+    archive_path = ensure_knowledge_state(config).archive / f"maintenance-{maintained[:10]}.jsonl"
+    for topic_id, topic in topics.items():
+        if not isinstance(topic, dict):
+            continue
+        if topic.get("status") == "active" and _int_or_zero(topic.get("skip_count")) >= 3:
+            topic["status"] = "deprioritized"
+            topic["deprioritized_at"] = maintained
+            append_jsonl(
+                archive_path,
+                {
+                    "kind": "topic_deprioritized",
+                    "topic_id": topic_id,
+                    "title": topic.get("title", ""),
+                    "reason": topic.get("skip_reason", ""),
+                    "maintained_at": maintained,
+                },
+            )
+            write_page(
+                page_path_for(config, "archive", str(topic.get("title") or topic_id)),
+                {
+                    "id": f"archive:topic-{topic_id}",
+                    "type": "archive",
+                    "status": "archived",
+                    "tags": ["catalog/archive"],
+                    "last_verified": maintained[:10],
+                    "evidence_status": "stale",
+                    "staleness_risk": "high",
+                    "watchlist": False,
+                },
+                str(topic.get("title") or topic_id),
+                [
+                    ("归档原因", str(topic.get("skip_reason", ""))),
+                    ("来源证据", str(topic.get("url", ""))),
+                ],
+            )
+            changed += 1
+
+    indexes["topic_index"] = topic_index
+    save_hot_index(config, "topic_index", topic_index)
+    return {"deprioritized_topics": changed}
+
+
 def evidence_shard_month(observed_at: str) -> str:
     match = SHARD_MONTH_RE.match(observed_at)
     if not match:
@@ -152,3 +207,10 @@ def append_jsonl(path: Path, item: Any) -> None:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
