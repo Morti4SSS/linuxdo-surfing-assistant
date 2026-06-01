@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -52,6 +54,46 @@ class KnowledgeConfigAndStateTests(unittest.TestCase):
                 with self.subTest(key=key):
                     with self.assertRaisesRegex(ValueError, "WebDAV"):
                         load_config(config_path)
+
+    def test_load_config_rejects_string_booleans_and_ignores_blank_optional_paths(self):
+        from tools.linuxdo_knowledge.config import load_config
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "knowledge_sources.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "linuxdo_scripts_bookmarks": {
+                            "path": "   ",
+                            "fallback_download_path": "\t",
+                        },
+                        "chrome_context": {"enabled": "false"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "chrome_context.enabled"):
+                load_config(config_path)
+
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "linuxdo_scripts_bookmarks": {
+                            "path": "   ",
+                            "fallback_download_path": "\t",
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertIsNone(config.bookmark_path)
+        self.assertIsNone(config.fallback_bookmark_path)
 
     def test_ensure_knowledge_state_creates_hot_indexes_and_directories(self):
         from tools.linuxdo_knowledge.config import KnowledgeConfig
@@ -114,3 +156,29 @@ class KnowledgeConfigAndStateTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue((tmp_path / "state" / "knowledge" / "topic_index.json").exists())
             self.assertTrue((tmp_path / "state" / "knowledge" / "session_log.jsonl").exists())
+
+    def test_script_knowledge_init_uses_config_and_creates_state(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps({"obsidian_vault_path": "vault"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SURF_PATH),
+                    "knowledge-init",
+                    "--config",
+                    str(config_path),
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((tmp_path / "state" / "knowledge" / "topic_index.json").exists())

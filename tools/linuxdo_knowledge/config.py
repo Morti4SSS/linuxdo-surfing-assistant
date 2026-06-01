@@ -49,8 +49,10 @@ def load_config(path: Path) -> KnowledgeConfig:
         obsidian_vault_path=_resolve_path(data.get("obsidian_vault_path", Path("obsidian") / "linuxdo"), project_root),
         bookmark_path=_optional_path(bookmark_config.get("path"), project_root),
         fallback_bookmark_path=_optional_path(bookmark_config.get("fallback_download_path"), project_root),
-        chrome_context_enabled=bool(chrome_config.get("enabled", True)),
-        github_verification_enabled=bool(github_config.get("enabled", True)),
+        chrome_context_enabled=_optional_bool(chrome_config.get("enabled", True), "chrome_context.enabled"),
+        github_verification_enabled=_optional_bool(
+            github_config.get("enabled", True), "github_verification.enabled"
+        ),
     )
 
 
@@ -77,9 +79,17 @@ def _resolve_path(value: Any, project_root: Path) -> Path:
 
 
 def _optional_path(value: Any, project_root: Path) -> Path | None:
-    if value is None or value == "":
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
         return None
     return _resolve_path(value, project_root)
+
+
+def _optional_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field_name} must be a boolean")
 
 
 def _reject_secret_keys(value: Any) -> None:

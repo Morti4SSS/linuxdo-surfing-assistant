@@ -3,9 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.linuxdo_knowledge.config import load_config
 from tools.linuxdo_knowledge.state import ensure_knowledge_state
