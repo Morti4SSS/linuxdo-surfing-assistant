@@ -877,6 +877,38 @@ class ReadingStrategyTests(unittest.TestCase):
         self.assertEqual(task["items"][1]["reading_level"], 2)
         self.assertEqual(task["items"][1]["action"], "read_incremental")
 
+    def test_build_knowledge_task_skips_deprioritized_and_archived_topics(self):
+        from tools.linuxdo_knowledge.strategy import build_knowledge_task
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_hot_index(
+                config,
+                "frontier_queue",
+                {
+                    "items": [
+                        {"topic_id": 1, "title": "降权帖", "priority": 100},
+                        {"topic_id": 2, "title": "归档帖", "priority": 90},
+                        {"topic_id": 3, "title": "可读帖", "priority": 80},
+                    ]
+                },
+            )
+            self.write_hot_index(
+                config,
+                "topic_index",
+                {
+                    "topics": {
+                        "1": {"topic_id": 1, "status": "deprioritized"},
+                        "2": {"topic_id": 2, "status": "archived"},
+                        "3": {"topic_id": 3, "status": "active"},
+                    }
+                },
+            )
+
+            task = build_knowledge_task(config, batch_size=20, created_at="2026-06-01T12:00:00+00:00")
+
+        self.assertEqual([item["topic_id"] for item in task["items"]], [3])
+
 
 class SessionIngestionTests(unittest.TestCase):
     def knowledge_config(self, tmp_path):
@@ -1232,6 +1264,53 @@ class SessionIngestionTests(unittest.TestCase):
             )
 
         self.assertEqual(result, {"readings": 0})
+
+    def test_ingest_session_counts_skipped_task_items_without_readings(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+        from tools.linuxdo_knowledge.state import load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            result = ingest_session(
+                config,
+                task={
+                    "items": [
+                        {
+                            "topic_id": 123,
+                            "title": "重复帖",
+                            "url": "https://linux.do/t/topic/123",
+                            "action": "skip",
+                            "skip_reason": "unchanged_read_topic",
+                            "reply_count": 12,
+                            "last_activity_at": "2026-06-01T11:00:00+00:00",
+                        },
+                        {
+                            "topic_id": 124,
+                            "title": "低价值帖",
+                            "url": "https://linux.do/t/topic/124",
+                            "action": "metadata_only",
+                            "skip_reason": "low_value_topic",
+                        },
+                    ]
+                },
+                readings={"readings": []},
+                batch_id="006",
+                observed_at="2026-06-01T12:30:00+00:00",
+            )
+            indexes = load_hot_indexes(config)
+            topic_index = indexes["topic_index"]["topics"]
+            topic_update_state = indexes["topic_update_state"]["topics"]
+            summary_exists = (config.state_root / "topic_summaries" / "123.json").exists()
+
+        self.assertEqual(result, {"readings": 0})
+        self.assertEqual(topic_index["123"]["skip_count"], 1)
+        self.assertEqual(topic_index["123"]["skip_reason"], "unchanged_read_topic")
+        self.assertEqual(topic_index["123"]["last_seen_at"], "2026-06-01T12:30:00+00:00")
+        self.assertEqual(topic_index["124"]["skip_count"], 1)
+        self.assertEqual(topic_index["124"]["skip_reason"], "low_value_topic")
+        self.assertEqual(topic_update_state["123"]["reply_count"], 12)
+        self.assertEqual(topic_update_state["123"]["last_activity_at"], "2026-06-01T11:00:00+00:00")
+        self.assertFalse(summary_exists)
 
     def test_ingest_session_accepts_topics_readings_shape_and_corrupt_hot_indexes(self):
         from tools.linuxdo_knowledge.session import ingest_session

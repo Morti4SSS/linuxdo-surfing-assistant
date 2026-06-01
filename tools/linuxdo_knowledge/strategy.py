@@ -69,6 +69,8 @@ def build_knowledge_task(
             continue
         indexed_topic = topic_index.get(str(topic_id), {})
         topic = {**indexed_topic, **frontier_item, "topic_id": topic_id}
+        if _is_suppressed_topic(topic):
+            continue
         plan = decide_reading_plan(topic, topic_updates.get(str(topic_id), {}))
         level = plan["level"]
         items.append(
@@ -153,6 +155,10 @@ def _topic_id_for(item: dict[str, Any]) -> int | None:
     if topic_id is not None:
         return topic_id
     return extract_topic_id(str(item.get("url", "")))
+
+
+def _is_suppressed_topic(topic: dict[str, Any]) -> bool:
+    return _str_or_empty(topic.get("status")).lower() in {"deprioritized", "archived"}
 
 
 def _dict_items(value: Any, key: str) -> dict[str, Any]:

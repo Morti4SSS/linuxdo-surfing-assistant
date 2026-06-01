@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .bookmarks import extract_topic_id
 from .config import KnowledgeConfig
 from .obsidian import append_log, page_path_for_id, scaffold_vault, write_page
 from .state import (
@@ -29,9 +30,12 @@ def ingest_session(
     indexes = load_hot_indexes(config)
     _normalize_hot_indexes(indexes)
     read_items = _readings_list(readings)
+    read_topic_ids = {str(topic_id) for topic_id in (_topic_id(reading) for reading in read_items) if topic_id is not None}
 
     for reading in read_items:
         _ingest_reading(config, indexes, reading, observed)
+    for item in _skipped_task_items(task, read_topic_ids):
+        _ingest_skipped_task_item(indexes, item, observed)
 
     save_hot_index(config, "topic_index", indexes["topic_index"])
     save_hot_index(config, "topic_update_state", indexes["topic_update_state"])
@@ -44,6 +48,38 @@ def ingest_session(
     )
     append_log(config, f"- {observed}: batch {batch_id} 写入 {len(read_items)} 条阅读结果。")
     return {"readings": len(read_items)}
+
+
+def _ingest_skipped_task_item(indexes: dict[str, Any], item: dict[str, Any], observed_at: str) -> None:
+    topic_id = _topic_id(item) or extract_topic_id(_text(item.get("url")))
+    if topic_id is None:
+        return
+
+    topic_key = str(topic_id)
+    existing_topic = indexes["topic_index"].setdefault("topics", {}).get(topic_key, {})
+    if not isinstance(existing_topic, dict):
+        existing_topic = {}
+    topic_item = {**existing_topic, "topic_id": topic_id, "last_seen_at": observed_at}
+    if _text(item.get("title")):
+        topic_item["title"] = _text(item.get("title"))
+    if _text(item.get("url")):
+        topic_item["url"] = _text(item.get("url"))
+    topic_item.setdefault("status", "active")
+    topic_item["skip_count"] = _int(topic_item.get("skip_count"), 0) + 1
+    topic_item["skip_reason"] = _text(item.get("skip_reason")) or _text(item.get("action"))
+    indexes["topic_index"].setdefault("topics", {})[topic_key] = topic_item
+
+    existing_update = indexes["topic_update_state"].setdefault("topics", {}).get(topic_key, {})
+    if not isinstance(existing_update, dict):
+        existing_update = {}
+    update_item = {**existing_update, "topic_id": topic_id, "last_seen_at": observed_at}
+    if "reply_count" in item:
+        update_item["reply_count"] = _int(item.get("reply_count"), 0)
+    if "last_activity_at" in item:
+        update_item["last_activity_at"] = _text(item.get("last_activity_at"))
+    if "skip_reason" in item:
+        update_item["skip_reason"] = _text(item.get("skip_reason"))
+    indexes["topic_update_state"].setdefault("topics", {})[topic_key] = update_item
 
 
 def _ingest_reading(config: KnowledgeConfig, indexes: dict[str, Any], reading: dict[str, Any], observed_at: str) -> None:
@@ -370,6 +406,19 @@ def _readings_list(readings: dict[str, Any] | list[dict[str, Any]]) -> list[dict
         return []
     value = readings.get("readings", readings.get("topics", []))
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _skipped_task_items(task: dict[str, Any], read_topic_ids: set[str]) -> list[dict[str, Any]]:
+    task_items = task.get("items", []) if isinstance(task, dict) else []
+    skipped: list[dict[str, Any]] = []
+    for item in _dict_list(task_items):
+        if item.get("action") not in ("skip", "metadata_only"):
+            continue
+        topic_id = _topic_id(item) or extract_topic_id(_text(item.get("url")))
+        if topic_id is not None and str(topic_id) in read_topic_ids:
+            continue
+        skipped.append(item)
+    return skipped
 
 
 def _dict_list(value: Any) -> list[dict[str, Any]]:
