@@ -1,7 +1,7 @@
 # Linux.do 冲浪到 Obsidian 知识库设计
 
 日期：2026-06-01
-状态：等待用户 review
+状态：已批准，已进入 writing plan
 
 ## 目标
 
