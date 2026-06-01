@@ -1266,3 +1266,156 @@ class SessionIngestionTests(unittest.TestCase):
         self.assertEqual(result, {"readings": 1})
         self.assertIn("123", topic_index["topics"])
         self.assertIn("status: candidate", candidate_text)
+
+
+class FeedbackSyncTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=None,
+            fallback_bookmark_path=None,
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def test_feedback_sync_reads_changed_pages_and_updates_indexes(self):
+        from tools.linuxdo_knowledge.feedback import sync_feedback
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            page = config.obsidian_vault_path / "catalog" / "resources" / "Tool.md"
+            page.parent.mkdir(parents=True)
+            page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: deprioritized\n---\n"
+                "# Tool\n\n## Agent 摘要\n旧\n\n## 我的反馈\n不想继续看这个方向\n",
+                encoding="utf-8",
+            )
+            claim_page = config.obsidian_vault_path / "wiki" / "drafts" / "Claim.md"
+            claim_page.parent.mkdir(parents=True)
+            claim_page.write_text(
+                "---\nid: \"claim:context-budget\"\ntype: claim\nstatus: disputed\n---\n"
+                "# Claim\n\n## 我的反馈\n这个结论需要重新验证\n",
+                encoding="utf-8",
+            )
+
+            result = sync_feedback(config, synced_at="2026-06-01T12:00:00+00:00")
+            indexes = load_hot_indexes(config)
+
+        self.assertEqual(result["changed_files"], 2)
+        feedback_items = {item["id"]: item for item in indexes["user_feedback"]["items"]}
+        self.assertEqual(feedback_items["resource:tool"]["feedback"], "不想继续看这个方向")
+        self.assertEqual(feedback_items["claim:context-budget"]["feedback"], "这个结论需要重新验证")
+        self.assertEqual(indexes["resource_index"]["resources"]["resource:tool"]["status"], "deprioritized")
+        self.assertEqual(indexes["claim_index"]["claims"]["claim:context-budget"]["status"], "disputed")
+        self.assertEqual(indexes["feedback_sync_state"]["last_sync_at"], "2026-06-01T12:00:00+00:00")
+
+    def test_feedback_sync_skips_unchanged_files_and_updates_existing_feedback_item(self):
+        from tools.linuxdo_knowledge.feedback import sync_feedback
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            page = config.obsidian_vault_path / "catalog" / "resources" / "Tool.md"
+            page.parent.mkdir(parents=True)
+            page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: active\n---\n"
+                "# Tool\n\n## 我的反馈\n第一次反馈\n",
+                encoding="utf-8",
+            )
+
+            first = sync_feedback(config, synced_at="2026-06-01T12:00:00+00:00")
+            second = sync_feedback(config, synced_at="2026-06-01T13:00:00+00:00")
+            page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: deprioritized\n---\n"
+                "# Tool\n\n## 我的反馈\n第二次反馈\n",
+                encoding="utf-8",
+            )
+            third = sync_feedback(config, synced_at="2026-06-01T14:00:00+00:00")
+            indexes = load_hot_indexes(config)
+
+        self.assertEqual(first["changed_files"], 1)
+        self.assertEqual(second["changed_files"], 0)
+        self.assertEqual(third["changed_files"], 1)
+        self.assertEqual(len(indexes["user_feedback"]["items"]), 1)
+        self.assertEqual(indexes["user_feedback"]["items"][0]["feedback"], "第二次反馈")
+
+    def test_feedback_sync_cli_writes_result_file(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "obsidian_vault_path": str(config.obsidian_vault_path),
+                        "state_root": str(config.state_root),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            output_path = tmp_path / "feedback.json"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "feedback-sync",
+                    "--config",
+                    str(config_path),
+                    "--output",
+                    str(output_path),
+                ]
+            )
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result, {"changed_files": 0})
+
+    def test_feedback_sync_stops_feedback_at_next_same_level_heading(self):
+        from tools.linuxdo_knowledge.feedback import sync_feedback
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            page = config.obsidian_vault_path / "catalog" / "resources" / "Tool.md"
+            page.parent.mkdir(parents=True)
+            page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: active\n---\n"
+                "# Tool\n\n## 我的反馈\n只同步这一段\n\n## 后续计划\n这里不是反馈\n",
+                encoding="utf-8",
+            )
+
+            sync_feedback(config, synced_at="2026-06-01T12:00:00+00:00")
+            indexes = load_hot_indexes(config)
+
+        self.assertEqual(indexes["user_feedback"]["items"][0]["feedback"], "只同步这一段")
+
+    def test_feedback_sync_recovers_corrupt_feedback_hot_indexes(self):
+        from tools.linuxdo_knowledge.feedback import sync_feedback
+        from tools.linuxdo_knowledge.state import load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            config.state_root.mkdir(parents=True)
+            for name in ("feedback_sync_state", "user_feedback", "resource_index", "claim_index"):
+                (config.state_root / f"{name}.json").write_text("{not valid json", encoding="utf-8")
+            page = config.obsidian_vault_path / "catalog" / "resources" / "Tool.md"
+            page.parent.mkdir(parents=True)
+            page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: active\n---\n# Tool\n\n## 我的反馈\n恢复同步\n",
+                encoding="utf-8",
+            )
+
+            result = sync_feedback(config, synced_at="2026-06-01T12:00:00+00:00")
+            indexes = load_hot_indexes(config)
+
+        self.assertEqual(result, {"changed_files": 1})
+        self.assertEqual(indexes["user_feedback"]["items"][0]["feedback"], "恢复同步")
+        self.assertEqual(indexes["resource_index"]["resources"]["resource:tool"]["status"], "active")

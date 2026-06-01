@@ -13,6 +13,7 @@ if __package__ in {None, ""}:
 
 from tools.linuxdo_knowledge.config import load_config
 from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+from tools.linuxdo_knowledge.feedback import sync_feedback
 from tools.linuxdo_knowledge.session import ingest_session
 from tools.linuxdo_knowledge.state import ensure_knowledge_state
 from tools.linuxdo_knowledge.strategy import build_knowledge_task
@@ -382,6 +383,13 @@ def run_knowledge_session(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_feedback_sync(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    result = sync_feedback(config)
+    write_json(args.output, result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Linux.do 任务型冲浪工具。")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -434,6 +442,11 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_session.add_argument("--batch-id", default="001")
     knowledge_session.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/knowledge_session_result.json"))
     knowledge_session.set_defaults(func=run_knowledge_session)
+
+    feedback_sync = subparsers.add_parser("feedback-sync", help="同步 Obsidian 人工反馈到机器状态。")
+    feedback_sync.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    feedback_sync.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/feedback_sync_result.json"))
+    feedback_sync.set_defaults(func=run_feedback_sync)
 
     return parser
 
