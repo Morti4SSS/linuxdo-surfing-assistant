@@ -7,6 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from tools.linuxdo_knowledge.config import load_config
+from tools.linuxdo_knowledge.state import ensure_knowledge_state
+
 
 MODES = {"research", "goldmine", "skill-feedback", "discover"}
 CONTROL_CHANNELS = {"codex-browser", "user-chrome", "mac-goal", "computer-use"}
@@ -340,6 +343,12 @@ def run_result(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_knowledge_init(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    ensure_knowledge_state(config)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Linux.do 任务型冲浪工具。")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -369,6 +378,10 @@ def build_parser() -> argparse.ArgumentParser:
     result.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
     result.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
     result.set_defaults(func=run_result)
+
+    knowledge_init = subparsers.add_parser("knowledge-init", help="初始化 Linux.do 知识库状态文件。")
+    knowledge_init.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    knowledge_init.set_defaults(func=run_knowledge_init)
 
     return parser
 
