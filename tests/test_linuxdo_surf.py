@@ -428,6 +428,40 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(written, {"new": 1, "metadata_changed": 0, "unchanged": 0})
 
+    def test_cli_knowledge_plan_writes_task(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            output_path = tmp_path / "out" / "knowledge_task_latest.json"
+            state_root = tmp_path / "state" / "knowledge"
+            config_path.parent.mkdir()
+            config_path.write_text(json.dumps({"obsidian_vault_path": "vault"}, ensure_ascii=False), encoding="utf-8")
+            state_root.mkdir(parents=True)
+            (state_root / "frontier_queue.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "topic_id": 42,
+                                "url": "https://linux.do/t/topic/42",
+                                "title": "实测工具",
+                                "priority": 80,
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = linuxdo_surf.main(
+                ["knowledge-plan", "--config", str(config_path), "--output", str(output_path), "--batch-size", "1"]
+            )
+            task = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(task["items"][0]["topic_id"], 42)
+        self.assertEqual(task["items"][0]["reading_level"], 2)
+
     def test_cli_result_writes_mode_result_and_updates_read_state(self):
         with TemporaryDirectoryPath() as tmp_path:
             task_path = tmp_path / "browser_task_research.json"

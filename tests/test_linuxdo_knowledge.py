@@ -519,3 +519,186 @@ class BookmarkSyncTests(unittest.TestCase):
 
         self.assertEqual(counts, {"new": 1, "metadata_changed": 0, "unchanged": 0})
         self.assertEqual(frontier["items"][0]["url"], "https://linux.do/t/topic/2273499")
+
+
+class ReadingStrategyTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=None,
+            fallback_bookmark_path=None,
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def write_hot_index(self, config, name, data):
+        path = config.state_root / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def test_decide_reading_plan_skips_unchanged_read_topic(self):
+        from tools.linuxdo_knowledge.strategy import decide_reading_plan
+
+        plan = decide_reading_plan(
+            {"title": "Codex 工作流", "reply_count": 10, "last_activity_at": "2026-06-01T10:00:00+00:00"},
+            {"read_reply_count": 10, "last_activity_at": "2026-06-01T10:00:00+00:00"},
+        )
+
+        self.assertEqual(plan["level"], 0)
+        self.assertEqual(plan["action"], "skip")
+        self.assertIn("unchanged", plan["skip_reason"])
+
+    def test_decide_reading_plan_watchlist_new_replies_reads_incremental_level_2(self):
+        from tools.linuxdo_knowledge.strategy import decide_reading_plan
+
+        plan = decide_reading_plan(
+            {"title": "Codex 工作流更新", "reply_count": 12, "last_activity_at": "2026-06-02T10:00:00+00:00"},
+            {"read_reply_count": 10, "last_activity_at": "2026-06-01T10:00:00+00:00", "watchlist": True},
+        )
+
+        self.assertEqual(plan["level"], 2)
+        self.assertEqual(plan["action"], "read_incremental")
+        self.assertEqual(plan["skip_reason"], "")
+
+    def test_decide_reading_plan_high_signal_words_upgrade_to_level_2(self):
+        from tools.linuxdo_knowledge.strategy import decide_reading_plan
+
+        signal_titles = ["实测某工具", "踩坑记录", "替代方案", "不推荐使用", "更新了", "解决了报错", "对比结果", "争议讨论"]
+
+        for title in signal_titles:
+            with self.subTest(title=title):
+                plan = decide_reading_plan({"title": title, "reply_count": 1})
+                self.assertEqual(plan["level"], 2)
+                self.assertEqual(plan["action"], "read")
+
+    def test_decide_reading_plan_low_value_terms_can_metadata_only(self):
+        from tools.linuxdo_knowledge.strategy import decide_reading_plan
+
+        plan = decide_reading_plan({"title": "今日签到水贴闲聊", "reply_count": 0})
+
+        self.assertEqual(plan["level"], 0)
+        self.assertEqual(plan["action"], "metadata_only")
+        self.assertIn("low_value", plan["skip_reason"])
+
+    def test_decide_reading_plan_requires_render_for_visual_ui_signals(self):
+        from tools.linuxdo_knowledge.strategy import decide_reading_plan
+
+        signal_text = "如图 看图 截图 效果如下 UI WebUI 按钮 报错图"
+        plan = decide_reading_plan({"title": "界面问题", "first_text": signal_text})
+
+        self.assertTrue(plan["render_required"])
+
+    def test_build_knowledge_task_uses_hot_indexes_sorts_and_ignores_corrupt_cold_history(self):
+        from tools.linuxdo_knowledge.strategy import build_knowledge_task
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            (config.state_root / "readings_all.json").parent.mkdir(parents=True)
+            (config.state_root / "readings_all.json").write_text("{not valid json", encoding="utf-8")
+            self.write_hot_index(
+                config,
+                "frontier_queue",
+                {
+                    "items": [
+                        {
+                            "url": "https://linux.do/t/topic/9",
+                            "title": "Z topic",
+                            "priority": 20,
+                            "reply_count": 1,
+                            "suggested_level": 1,
+                        },
+                        {
+                            "url": "https://linux.do/t/topic/8",
+                            "title": "A topic",
+                            "priority": 90,
+                            "reply_count": 2,
+                            "suggested_level": 1,
+                        },
+                        {
+                            "url": "https://linux.do/t/topic/7",
+                            "title": "B topic",
+                            "priority": 90,
+                            "reply_count": 3,
+                            "suggested_level": 2,
+                        },
+                    ]
+                },
+            )
+
+            task = build_knowledge_task(config, batch_size=2, created_at="2026-06-01T12:00:00+00:00")
+
+        self.assertEqual(task["created_at"], "2026-06-01T12:00:00+00:00")
+        self.assertEqual(task["source"], "knowledge_frontier_queue")
+        self.assertEqual(task["extraction_policy"], "dom_text_first_render_on_demand")
+        self.assertEqual(task["history_policy"], "load_hot_indexes_only")
+        self.assertEqual([item["topic_id"] for item in task["items"]], [8, 7])
+        self.assertEqual([item["title"] for item in task["items"]], ["A topic", "B topic"])
+        self.assertEqual(task["items"][0]["reading_level"], 1)
+        for key in [
+            "topic_id",
+            "title",
+            "url",
+            "reading_level",
+            "action",
+            "skip_reason",
+            "render_required",
+            "render_policy",
+            "reply_policy",
+        ]:
+            self.assertIn(key, task["items"][0])
+
+    def test_build_knowledge_task_uses_topic_update_state_for_skip_and_incremental(self):
+        from tools.linuxdo_knowledge.strategy import build_knowledge_task
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_hot_index(
+                config,
+                "frontier_queue",
+                {
+                    "items": [
+                        {
+                            "topic_id": 1,
+                            "url": "https://linux.do/t/topic/1",
+                            "title": "已读帖",
+                            "priority": 80,
+                            "reply_count": 5,
+                            "last_activity_at": "2026-06-01T10:00:00+00:00",
+                        },
+                        {
+                            "topic_id": 2,
+                            "url": "https://linux.do/t/topic/2",
+                            "title": "关注帖",
+                            "priority": 70,
+                            "reply_count": 8,
+                            "last_activity_at": "2026-06-02T10:00:00+00:00",
+                        },
+                    ]
+                },
+            )
+            self.write_hot_index(
+                config,
+                "topic_update_state",
+                {
+                    "topics": {
+                        "1": {"read_reply_count": 5, "last_activity_at": "2026-06-01T10:00:00+00:00"},
+                        "2": {
+                            "read_reply_count": 6,
+                            "last_activity_at": "2026-06-01T10:00:00+00:00",
+                            "watchlist": True,
+                        },
+                    }
+                },
+            )
+
+            task = build_knowledge_task(config, batch_size=20, created_at="2026-06-01T12:00:00+00:00")
+
+        self.assertEqual(task["items"][0]["reading_level"], 0)
+        self.assertEqual(task["items"][0]["action"], "skip")
+        self.assertIn("unchanged", task["items"][0]["skip_reason"])
+        self.assertEqual(task["items"][1]["reading_level"], 2)
+        self.assertEqual(task["items"][1]["action"], "read_incremental")

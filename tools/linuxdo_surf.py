@@ -14,6 +14,7 @@ if __package__ in {None, ""}:
 from tools.linuxdo_knowledge.config import load_config
 from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
 from tools.linuxdo_knowledge.state import ensure_knowledge_state
+from tools.linuxdo_knowledge.strategy import build_knowledge_task
 
 
 MODES = {"research", "goldmine", "skill-feedback", "discover"}
@@ -362,6 +363,15 @@ def run_bookmark_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_knowledge_plan(args: argparse.Namespace) -> int:
+    _validate_positive("batch-size", args.batch_size)
+    config = load_config(args.config)
+    ensure_knowledge_state(config)
+    task = build_knowledge_task(config, batch_size=args.batch_size)
+    write_json(args.output, task)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Linux.do 任务型冲浪工具。")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -400,6 +410,12 @@ def build_parser() -> argparse.ArgumentParser:
     bookmark_sync.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
     bookmark_sync.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/bookmark_sync_result.json"))
     bookmark_sync.set_defaults(func=run_bookmark_sync)
+
+    knowledge_plan = subparsers.add_parser("knowledge-plan", help="从轻量 frontier 生成知识库阅读任务。")
+    knowledge_plan.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    knowledge_plan.add_argument("--batch-size", type=int, default=20)
+    knowledge_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/knowledge_task_latest.json"))
+    knowledge_plan.set_defaults(func=run_knowledge_plan)
 
     return parser
 
