@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ JSON_DEFAULTS = {
 }
 
 HOT_INDEX_NAMES = tuple(JSON_DEFAULTS.keys())
+SHARD_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])")
 
 
 def paths_for(config: KnowledgeConfig) -> KnowledgePaths:
@@ -118,9 +120,17 @@ def upsert_topic_summary(config: KnowledgeConfig, topic_id: int | str, summary: 
 def append_evidence(config: KnowledgeConfig, evidence: dict[str, Any], observed_at: str | None = None) -> Path:
     paths = ensure_knowledge_state(config)
     observed = observed_at or now_iso()
-    path = paths.evidence_shards / f"{observed[:7]}.jsonl"
+    shard_month = evidence_shard_month(observed)
+    path = paths.evidence_shards / f"{shard_month}.jsonl"
     append_jsonl(path, {**evidence, "observed_at": observed})
     return path
+
+
+def evidence_shard_month(observed_at: str) -> str:
+    match = SHARD_MONTH_RE.match(observed_at)
+    if not match:
+        raise ValueError(f"observed_at must start with ISO-like YYYY-MM month, got {observed_at!r}")
+    return observed_at[:7]
 
 
 def load_json(path: Path, default: Any) -> Any:

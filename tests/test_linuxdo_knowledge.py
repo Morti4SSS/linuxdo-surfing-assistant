@@ -225,6 +225,33 @@ class KnowledgeConfigAndStateTests(unittest.TestCase):
         self.assertEqual(written_path, config.state_root / "evidence_shards" / "2026-05.jsonl")
         self.assertEqual(item, {"topic_id": 7, "claim": "useful", "observed_at": "2026-05-12T08:09:10+00:00"})
 
+    def test_append_evidence_rejects_invalid_observed_at_without_weird_shard(self):
+        from tools.linuxdo_knowledge.state import append_evidence
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+
+            with self.assertRaisesRegex(ValueError, "observed_at"):
+                append_evidence(config, {"topic_id": 7}, observed_at="../../bad")
+
+            shard_paths = list((config.state_root / "evidence_shards").glob("*.jsonl"))
+
+        self.assertEqual(shard_paths, [])
+
+    def test_append_evidence_appends_multiple_lines_for_same_month(self):
+        from tools.linuxdo_knowledge.state import append_evidence
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            first_path = append_evidence(config, {"topic_id": 1}, observed_at="2026-05-01T00:00:00+00:00")
+            second_path = append_evidence(config, {"topic_id": 2}, observed_at="2026-05-31T23:59:59+00:00")
+            lines = first_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(first_path, second_path)
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[0])["topic_id"], 1)
+        self.assertEqual(json.loads(lines[1])["topic_id"], 2)
+
     def test_cli_knowledge_init_uses_config_and_creates_state(self):
         with TemporaryDirectoryPath() as tmp_path:
             config_path = tmp_path / "config" / "knowledge_sources.json"
