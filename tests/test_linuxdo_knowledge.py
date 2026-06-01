@@ -25,6 +25,19 @@ class TemporaryDirectoryPath:
 
 
 class KnowledgeConfigAndStateTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=tmp_path / "bookmarks.json",
+            fallback_bookmark_path=tmp_path / "bookmarkData.json",
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
     def test_load_config_rejects_secret_like_credentials_anywhere(self):
         from tools.linuxdo_knowledge.config import load_config
 
@@ -96,19 +109,10 @@ class KnowledgeConfigAndStateTests(unittest.TestCase):
         self.assertIsNone(config.fallback_bookmark_path)
 
     def test_ensure_knowledge_state_creates_hot_indexes_and_directories(self):
-        from tools.linuxdo_knowledge.config import KnowledgeConfig
         from tools.linuxdo_knowledge.state import ensure_knowledge_state
 
         with TemporaryDirectoryPath() as tmp_path:
-            config = KnowledgeConfig(
-                project_root=tmp_path,
-                state_root=tmp_path / "state" / "knowledge",
-                obsidian_vault_path=tmp_path / "vault",
-                bookmark_path=tmp_path / "bookmarks.json",
-                fallback_bookmark_path=tmp_path / "bookmarkData.json",
-                chrome_context_enabled=True,
-                github_verification_enabled=True,
-            )
+            config = self.knowledge_config(tmp_path)
 
             ensure_knowledge_state(config)
 
@@ -131,6 +135,95 @@ class KnowledgeConfigAndStateTests(unittest.TestCase):
             self.assertTrue((state_root / "topic_summaries").is_dir())
             self.assertTrue((state_root / "evidence_shards").is_dir())
             self.assertTrue((state_root / "archive").is_dir())
+
+    def test_load_hot_indexes_ignores_corrupt_cold_history(self):
+        from tools.linuxdo_knowledge.state import load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            cold_history = config.state_root / "readings_all.json"
+            cold_history.parent.mkdir(parents=True)
+            cold_history.write_text("{invalid json", encoding="utf-8")
+
+            indexes = load_hot_indexes(config)
+
+        self.assertEqual(
+            indexes,
+            {
+                "topic_index": {"topics": {}},
+                "topic_update_state": {"topics": {}},
+                "resource_index": {"resources": {}},
+                "claim_index": {"claims": {}},
+                "feedback_sync_state": {"last_sync_at": None, "files": {}},
+                "user_feedback": {"items": []},
+                "frontier_queue": {"items": []},
+                "bookmark_source_index": {"bookmarks": {}},
+            },
+        )
+
+    def test_save_hot_index_writes_known_index_and_rejects_unknown_name(self):
+        from tools.linuxdo_knowledge.state import save_hot_index
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            path = save_hot_index(config, "topic_index", {"topics": {"7": {"title": "known"}}})
+
+            with self.assertRaisesRegex(ValueError, "unknown hot index"):
+                save_hot_index(config, "readings_all", {})
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+            cold_history_exists = (config.state_root / "readings_all.json").exists()
+
+        self.assertEqual(path, config.state_root / "topic_index.json")
+        self.assertEqual(data, {"topics": {"7": {"title": "known"}}})
+        self.assertFalse(cold_history_exists)
+
+    def test_upsert_topic_summary_merges_fields_and_updates_timestamp(self):
+        from tools.linuxdo_knowledge.state import topic_summary_path, upsert_topic_summary
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            path = topic_summary_path(config, "42")
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "topic_id": 42,
+                        "title": "old title",
+                        "kept": "yes",
+                        "updated_at": "2026-01-01T00:00:00+00:00",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            written_path = upsert_topic_summary(config, "42", {"title": "new title", "tags": ["ai"]})
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(written_path, path)
+        self.assertEqual(data["topic_id"], 42)
+        self.assertEqual(data["title"], "new title")
+        self.assertEqual(data["kept"], "yes")
+        self.assertEqual(data["tags"], ["ai"])
+        self.assertNotEqual(data["updated_at"], "2026-01-01T00:00:00+00:00")
+
+    def test_append_evidence_writes_observed_month_jsonl(self):
+        from tools.linuxdo_knowledge.state import append_evidence
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            written_path = append_evidence(
+                config,
+                {"topic_id": 7, "claim": "useful"},
+                observed_at="2026-05-12T08:09:10+00:00",
+            )
+            line = written_path.read_text(encoding="utf-8").strip()
+            item = json.loads(line)
+
+        self.assertEqual(written_path, config.state_root / "evidence_shards" / "2026-05.jsonl")
+        self.assertEqual(item, {"topic_id": 7, "claim": "useful", "observed_at": "2026-05-12T08:09:10+00:00"})
 
     def test_cli_knowledge_init_uses_config_and_creates_state(self):
         with TemporaryDirectoryPath() as tmp_path:
