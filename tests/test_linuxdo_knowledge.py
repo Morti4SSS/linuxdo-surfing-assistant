@@ -401,6 +401,46 @@ class BookmarkSyncTests(unittest.TestCase):
         self.assertEqual(frontier["items"][0]["folder"], "Skills / Plugins")
         self.assertEqual(frontier["items"][0]["tags"], ["skill", "实测"])
 
+    def test_sync_bookmarks_reuses_existing_frontier_item_when_bookmark_index_is_missing(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_bookmarks(config.bookmark_path, self.bookmark_export())
+            ensure_knowledge_state(config)
+            (config.state_root / "frontier_queue.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "url": "https://linux.do/t/topic/2273499",
+                                "title": "旧 frontier 标题",
+                                "source": "manual",
+                                "created_at": "2026-05-31T00:00:00+00:00",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (config.state_root / "bookmark_source_index.json").write_text(
+                json.dumps({"bookmarks": {}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            counts = sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+
+            bookmark_index = json.loads((config.state_root / "bookmark_source_index.json").read_text(encoding="utf-8"))
+            frontier = json.loads((config.state_root / "frontier_queue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(counts, {"new": 1, "metadata_changed": 0, "unchanged": 0})
+        self.assertIn("https://linux.do/t/topic/2273499", bookmark_index["bookmarks"])
+        self.assertEqual(len(frontier["items"]), 1)
+        self.assertEqual(frontier["items"][0]["title"], "某 skill 讨论")
+        self.assertEqual(frontier["items"][0]["created_at"], "2026-05-31T00:00:00+00:00")
+
     def test_sync_bookmarks_unchanged_updates_last_seen_without_duplicate_frontier_item(self):
         from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
 

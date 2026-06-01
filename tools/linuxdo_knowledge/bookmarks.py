@@ -102,8 +102,13 @@ def sync_bookmarks(config: KnowledgeConfig, seen_at: str | None = None) -> dict[
         existing = index_items.get(url)
         if not isinstance(existing, dict):
             index_items[url] = _bookmark_index_item(item, seen)
-            frontier_items.append(_frontier_item(item, seen))
-            frontier_by_url[url] = frontier_items[-1]
+            frontier_item = frontier_by_url.get(url)
+            if frontier_item is None:
+                frontier_item = _frontier_item(item, seen)
+                frontier_items.append(frontier_item)
+                frontier_by_url[url] = frontier_item
+            else:
+                frontier_item.update(_frontier_update(item, seen))
             counts["new"] += 1
             continue
 
