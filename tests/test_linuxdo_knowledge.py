@@ -108,6 +108,20 @@ class KnowledgeConfigAndStateTests(unittest.TestCase):
         self.assertIsNone(config.bookmark_path)
         self.assertIsNone(config.fallback_bookmark_path)
 
+    def test_load_config_stores_bookmark_enabled_flag(self):
+        from tools.linuxdo_knowledge.config import load_config
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "knowledge_sources.json"
+            config_path.write_text(
+                json.dumps({"linuxdo_scripts_bookmarks": {"enabled": False}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertFalse(config.bookmark_enabled)
+
     def test_ensure_knowledge_state_creates_hot_indexes_and_directories(self):
         from tools.linuxdo_knowledge.state import ensure_knowledge_state
 
@@ -302,3 +316,166 @@ class KnowledgeConfigAndStateTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((tmp_path / "state" / "knowledge" / "topic_index.json").exists())
+
+
+class BookmarkSyncTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path, *, bookmark_path=None, fallback_bookmark_path=None, bookmark_enabled=True):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=bookmark_path if bookmark_path is not None else tmp_path / "bookmarks.json",
+            fallback_bookmark_path=fallback_bookmark_path
+            if fallback_bookmark_path is not None
+            else tmp_path / "bookmarkData.json",
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+            bookmark_enabled=bookmark_enabled,
+        )
+
+    def bookmark_export(self, *, title="某 skill 讨论", tags=None, cate="开发调优", folder="Skills / Plugins"):
+        return [
+            {
+                "id": 0,
+                "name": folder,
+                "list": [
+                    {
+                        "cate": cate,
+                        "tags": ["skill", "实测"] if tags is None else tags,
+                        "timestamp": 1780151443336,
+                        "title": title,
+                        "url": "https://linux.do/t/topic/2273499",
+                    }
+                ],
+            }
+        ]
+
+    def write_bookmarks(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def test_parse_bookmark_export_flattens_linuxdo_scripts_shape(self):
+        from tools.linuxdo_knowledge.bookmarks import parse_bookmark_export
+
+        items = parse_bookmark_export(self.bookmark_export())
+
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["folder"], "Skills / Plugins")
+        self.assertEqual(item["cate"], "开发调优")
+        self.assertEqual(item["tags"], ["skill", "实测"])
+        self.assertEqual(item["timestamp"], 1780151443336)
+        self.assertEqual(item["title"], "某 skill 讨论")
+        self.assertEqual(item["url"], "https://linux.do/t/topic/2273499")
+        self.assertEqual(item["topic_id"], 2273499)
+        self.assertRegex(item["content_hash"], r"^[0-9a-f]{64}$")
+
+    def test_extract_topic_id_accepts_topic_and_slug_urls(self):
+        from tools.linuxdo_knowledge.bookmarks import extract_topic_id
+
+        self.assertEqual(extract_topic_id("https://linux.do/t/topic/2273499"), 2273499)
+        self.assertEqual(extract_topic_id("https://linux.do/t/some-slug/2273499"), 2273499)
+        self.assertIsNone(extract_topic_id("https://linux.do/u/someone"))
+
+    def test_sync_bookmarks_adds_new_bookmark_to_index_and_frontier(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_bookmarks(config.bookmark_path, self.bookmark_export())
+
+            counts = sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+
+            bookmark_index = json.loads((config.state_root / "bookmark_source_index.json").read_text(encoding="utf-8"))
+            frontier = json.loads((config.state_root / "frontier_queue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(counts, {"new": 1, "metadata_changed": 0, "unchanged": 0})
+        bookmark = bookmark_index["bookmarks"]["https://linux.do/t/topic/2273499"]
+        self.assertEqual(bookmark["title"], "某 skill 讨论")
+        self.assertEqual(bookmark["last_seen_at"], "2026-06-01T00:00:00+00:00")
+        self.assertEqual(len(frontier["items"]), 1)
+        self.assertEqual(frontier["items"][0]["source"], "linuxdo_scripts_bookmark")
+        self.assertEqual(frontier["items"][0]["topic_id"], 2273499)
+        self.assertEqual(frontier["items"][0]["folder"], "Skills / Plugins")
+        self.assertEqual(frontier["items"][0]["tags"], ["skill", "实测"])
+
+    def test_sync_bookmarks_unchanged_updates_last_seen_without_duplicate_frontier_item(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_bookmarks(config.bookmark_path, self.bookmark_export())
+            sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+
+            counts = sync_bookmarks(config, seen_at="2026-06-02T00:00:00+00:00")
+
+            bookmark_index = json.loads((config.state_root / "bookmark_source_index.json").read_text(encoding="utf-8"))
+            frontier = json.loads((config.state_root / "frontier_queue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(counts, {"new": 0, "metadata_changed": 0, "unchanged": 1})
+        self.assertEqual(bookmark_index["bookmarks"]["https://linux.do/t/topic/2273499"]["last_seen_at"], "2026-06-02T00:00:00+00:00")
+        self.assertEqual(len(frontier["items"]), 1)
+
+    def test_sync_bookmarks_metadata_change_updates_index_and_bumps_frontier_item(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_bookmarks(config.bookmark_path, self.bookmark_export())
+            sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+            self.write_bookmarks(
+                config.bookmark_path,
+                self.bookmark_export(title="更新后的 skill 讨论", tags=["plugin"], cate="工具评测", folder="Inbox"),
+            )
+
+            counts = sync_bookmarks(config, seen_at="2026-06-03T00:00:00+00:00")
+
+            bookmark_index = json.loads((config.state_root / "bookmark_source_index.json").read_text(encoding="utf-8"))
+            frontier = json.loads((config.state_root / "frontier_queue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(counts, {"new": 0, "metadata_changed": 1, "unchanged": 0})
+        bookmark = bookmark_index["bookmarks"]["https://linux.do/t/topic/2273499"]
+        self.assertEqual(bookmark["title"], "更新后的 skill 讨论")
+        self.assertEqual(bookmark["folder"], "Inbox")
+        self.assertEqual(len(frontier["items"]), 1)
+        self.assertEqual(frontier["items"][0]["title"], "更新后的 skill 讨论")
+        self.assertEqual(frontier["items"][0]["folder"], "Inbox")
+        self.assertEqual(frontier["items"][0]["tags"], ["plugin"])
+        self.assertEqual(frontier["items"][0]["updated_at"], "2026-06-03T00:00:00+00:00")
+
+    def test_sync_bookmarks_disabled_returns_zeros_and_does_not_read_file(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(
+                tmp_path,
+                bookmark_path=tmp_path / "invalid.json",
+                fallback_bookmark_path=None,
+                bookmark_enabled=False,
+            )
+            config.bookmark_path.write_text("{not json", encoding="utf-8")
+
+            counts = sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+
+        self.assertEqual(counts, {"new": 0, "metadata_changed": 0, "unchanged": 0})
+
+    def test_sync_bookmarks_uses_fallback_when_configured_path_is_missing(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+
+        with TemporaryDirectoryPath() as tmp_path:
+            fallback_path = tmp_path / "downloads" / "bookmarkData.json"
+            config = self.knowledge_config(
+                tmp_path,
+                bookmark_path=tmp_path / "missing.json",
+                fallback_bookmark_path=fallback_path,
+            )
+            self.write_bookmarks(fallback_path, self.bookmark_export())
+
+            counts = sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+
+            frontier = json.loads((config.state_root / "frontier_queue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(counts, {"new": 1, "metadata_changed": 0, "unchanged": 0})
+        self.assertEqual(frontier["items"][0]["url"], "https://linux.do/t/topic/2273499")

@@ -324,6 +324,52 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(package["evidence"][0]["skill_name"], "skill-creator")
 
+    def test_cli_bookmark_sync_writes_result(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            bookmark_path = tmp_path / "bookmarks.json"
+            output_path = tmp_path / "out" / "bookmark_sync_result.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "linuxdo_scripts_bookmarks": {"enabled": True, "path": str(bookmark_path)},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            bookmark_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "Skills / Plugins",
+                            "list": [
+                                {
+                                    "cate": "开发调优",
+                                    "tags": ["skill"],
+                                    "timestamp": 1780151443336,
+                                    "title": "某 skill 讨论",
+                                    "url": "https://linux.do/t/topic/2273499",
+                                }
+                            ],
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = linuxdo_surf.main(
+                ["bookmark-sync", "--config", str(config_path), "--output", str(output_path)]
+            )
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["new"], 1)
+        self.assertEqual(result["metadata_changed"], 0)
+        self.assertEqual(result["unchanged"], 0)
+
     def test_cli_result_writes_mode_result_and_updates_read_state(self):
         with TemporaryDirectoryPath() as tmp_path:
             task_path = tmp_path / "browser_task_research.json"

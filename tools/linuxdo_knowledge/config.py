@@ -25,6 +25,7 @@ class KnowledgeConfig:
     fallback_bookmark_path: Path | None
     chrome_context_enabled: bool
     github_verification_enabled: bool
+    bookmark_enabled: bool = True
 
 
 def load_config(path: Path) -> KnowledgeConfig:
@@ -52,6 +53,9 @@ def load_config(path: Path) -> KnowledgeConfig:
         chrome_context_enabled=_optional_bool(chrome_config.get("enabled", True), "chrome_context.enabled"),
         github_verification_enabled=_optional_bool(
             github_config.get("enabled", True), "github_verification.enabled"
+        ),
+        bookmark_enabled=_optional_bool(
+            bookmark_config.get("enabled", True), "linuxdo_scripts_bookmarks.enabled"
         ),
     )
 

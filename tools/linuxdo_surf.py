@@ -12,6 +12,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.linuxdo_knowledge.config import load_config
+from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
 from tools.linuxdo_knowledge.state import ensure_knowledge_state
 
 
@@ -353,6 +354,14 @@ def run_knowledge_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_bookmark_sync(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    ensure_knowledge_state(config)
+    result = sync_bookmarks(config)
+    write_json(args.output, result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Linux.do 任务型冲浪工具。")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -386,6 +395,11 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_init = subparsers.add_parser("knowledge-init", help="初始化 Linux.do 知识库状态文件。")
     knowledge_init.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
     knowledge_init.set_defaults(func=run_knowledge_init)
+
+    bookmark_sync = subparsers.add_parser("bookmark-sync", help="同步 LinuxDo Scripts 书签到 frontier 队列。")
+    bookmark_sync.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    bookmark_sync.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/bookmark_sync_result.json"))
+    bookmark_sync.set_defaults(func=run_bookmark_sync)
 
     return parser
 
