@@ -620,8 +620,8 @@ class ObsidianVaultTests(unittest.TestCase):
         with TemporaryDirectoryPath() as tmp_path:
             path = tmp_path / "vault" / "wiki" / "notes" / "demo.md"
             write_page(path, {"title": "Old"}, "Old", [("旧摘要", "旧内容")])
-            user_feedback = "\n用户第一行\n- 保留这个列表\n\n"
-            path.write_text(path.read_text(encoding="utf-8") + user_feedback, encoding="utf-8")
+            feedback_after_heading = "\n\n用户第一行\n- 保留这个列表\n\n"
+            path.write_text(path.read_text(encoding="utf-8") + "\n用户第一行\n- 保留这个列表\n\n", encoding="utf-8")
 
             write_page(path, {"title": "New"}, "New", [("新摘要", "新内容")])
 
@@ -631,7 +631,25 @@ class ObsidianVaultTests(unittest.TestCase):
         self.assertIn("# New\n", text)
         self.assertIn("## 新摘要\n\n新内容\n", text)
         self.assertNotIn("旧摘要", text)
-        self.assertEqual(preserved_feedback, user_feedback)
+        self.assertEqual(preserved_feedback, feedback_after_heading)
+
+    def test_write_page_preserves_feedback_spacing_at_end(self):
+        from tools.linuxdo_knowledge.obsidian import FEEDBACK_HEADING, write_page
+
+        with TemporaryDirectoryPath() as tmp_path:
+            path = tmp_path / "vault" / "wiki" / "notes" / "demo.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "---\ntitle: Old\n---\n\n# Old\n\n## 旧摘要\n\n旧内容\n\n## 我的反馈\n\n第一行\n\n第二段\n",
+                encoding="utf-8",
+            )
+
+            write_page(path, {"title": "New"}, "New", [("新摘要", "新内容")])
+
+            text = path.read_text(encoding="utf-8")
+
+        self.assertNotIn("旧摘要", text)
+        self.assertTrue(text.endswith(f"{FEEDBACK_HEADING}\n\n第一行\n\n第二段\n"))
 
     def test_page_path_for_maps_types_and_safe_filename_removes_invalid_characters(self):
         from tools.linuxdo_knowledge.obsidian import page_path_for, safe_filename

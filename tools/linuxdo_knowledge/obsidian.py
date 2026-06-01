@@ -70,8 +70,6 @@ def write_page(path: Path, frontmatter: dict[str, Any], title: str, sections: li
         existing = path.read_text(encoding="utf-8")
         if FEEDBACK_HEADING in existing:
             feedback = existing.split(FEEDBACK_HEADING, 1)[1]
-            if feedback.startswith("\n\n"):
-                feedback = feedback[1:]
 
     parts = [_format_frontmatter(frontmatter), f"# {title}\n\n"]
     for heading, body in sections:
