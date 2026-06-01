@@ -51,9 +51,31 @@ feedback_sync_state.json
 user_feedback.json
 frontier_queue.json
 session_log.jsonl
+topic_summaries/
+evidence_shards/
+archive/
 ```
 
 机器状态不依赖 Obsidian 文件路径作为唯一身份，而是通过页面 frontmatter 里的稳定 `id` 对齐。
+
+机器状态必须区分“热索引”和“冷历史”，避免每次 goal 启动都把历史阅读记录塞进上下文。
+
+热索引只保存判断下一步需要的最小字段：
+
+- `topic_index.json`：topic id、标题、URL、分类、标签、价值等级、状态、watchlist、最后出现时间、关联资源/claim id。
+- `topic_update_state.json`：topic id、已读到的最高楼层或 post id、回复数、最后活动时间、上次阅读级别、已读区间、内容指纹、是否有未解决争议。
+- `resource_index.json`：资源 id、名称、主页/GitHub、类别、状态、证据数量、最后验证时间、关联对比页。
+- `claim_index.json`：观点 id、简短 claim、支持/反对资源、证据状态、过时风险、未解决问题。
+- `frontier_queue.json`：候选 URL、来源、优先级、为什么值得看、下次应采用的阅读级别。
+
+冷历史保存完整或较长的历史材料，但默认不进入上下文：
+
+- `topic_summaries/<topic_id>.json`：单 topic 的旧摘要、关键回复、资源、claim、上次结论。
+- `evidence_shards/YYYY-MM.jsonl`：按月份追加原始证据摘要，便于追溯但不全量加载。
+- `archive/`：低价值、过期、重复或已浓缩内容的冷存储。
+- 旧的 `readings_all.json` 只能作为 legacy cold archive，除非执行迁移、审计或用户明确要求，否则不得在 goal 启动时读取。
+
+当需要判断“这个 topic 是否读过”时，只查热索引；当确实要更新某个已读 topic 时，只读对应 `topic_summaries/<topic_id>.json` 和相关 resource/claim 摘要。
 
 ### Obsidian 知识层
 
@@ -102,6 +124,7 @@ vault/
 不包含：
 
 - 导入已有 30 批历史结果。
+- 全量读取旧 `readings_all.json` 作为启动上下文。
 - Codex 直接请求 WebDAV 或保存 WebDAV 账号密码。
 - 定时主动巡检 watchlist。
 - 全量镜像论坛。
@@ -535,6 +558,27 @@ Level 3 用于高价值争议、工具对比、完整实测、长期复盘或直
 
 处理某个 topic 时，只加载该 topic 的旧摘要、状态、楼层进度和相关 resource/claim 摘要，不加载全局历史。
 
+### 状态瘦身和冷历史
+
+历史增长后，状态文件不能继续向单一大 JSON 膨胀。第一版按以下规则维护：
+
+- 热索引文件必须可被快速读取和人工检查，目标是只保存短字段、id、状态和指针。
+- 单 topic 的长摘要、关键回复、证据列表写入 `topic_summaries/<topic_id>.json`，按 topic 读取。
+- 批次证据追加到按月份分片的 `evidence_shards/YYYY-MM.jsonl`，避免一个文件无限增长。
+- 低价值 topic 只在 `topic_index.json` 留下 `seen + skip_reason + last_seen_at`，不写长摘要。
+- 多次出现但一直低价值的 topic 降为 `deprioritized`，后续只看 metadata，除非来自用户收藏或出现强新信号。
+- 已沉淀进 Obsidian 的资源/claim 不再依赖完整原始阅读记录，机器状态只保留证据指针和简短摘要。
+- 旧 `readings_all.json` 不再追加新内容；后续如需迁移，只做离线 migration，迁移结果进入热索引、topic summary 和 evidence shard。
+
+建议设置轻量维护命令或批末维护步骤：
+
+- 每 5-10 批检查热索引体积和重复项。
+- 把连续无用、过期、重复的候选移到 `archive/` 或只保留 skip marker。
+- 把多条同义 claim 合并为一个 canonical claim，并保留 alias。
+- 把过长的 topic summary 压缩成“主结论 + 关键证据 + 未解决问题 + 指针”。
+
+维护步骤只能读取需要处理的分片或 topic summary，不允许为了维护而加载全部历史。
+
 ### 批内缓存和去重
 
 同一批内：
@@ -920,6 +964,33 @@ Codex 可以重写、润色、压缩、合并和重排 `## 我的反馈` 以外�
 
 如果 Codex 对大范围重写没有把握，应写建议到 `inbox/` 或 `log.md`，不要静默重写很多页面。
 
+## 知识库迭代和维护
+
+Obsidian vault 是人工可读的知识产品，不是机器状态的镜像。长期维护目标是让知识更清晰，而不是把每次冲浪的所有发现都永久展开。
+
+每次 surfing goal 启动前只做轻量反馈同步；每批只写必要增量；知识库整理可以分为三种频率：
+
+- 批末整理：写 session、更新新资源/候选/对比/少量 draft。
+- goal 启动整理：读取用户反馈、归档移动、状态修改，把偏好同步进机器状态。
+- 周期性维护：用户明确要求或累计多批后再做，重点合并重复页、压缩候选、更新对比结论、处理过时内容。
+
+页面膨胀时优先使用这些动作：
+
+- 资源页保留当前判断、适用场景、主要证据和相关对比，把流水讨论移到来源证据或 session。
+- 候选页长期没有新证据时，转为 `deprioritized` 或 `archive`。
+- 对比页保留“按场景怎么选”，不罗列所有论坛观点。
+- wiki 页只保留可复用思路，具体工具争论放到资源页或对比页。
+- session 报告只作为批次日志，不反复改写成百科。
+
+过时或有争议的内容不直接删除，先调整状态：
+
+- 已证伪：页面 `status` 改为 `archived` 或 `deprioritized`，证据 `evidence_status` 改为 `superseded`，保留为什么不再推荐。
+- 证据冲突：证据 `evidence_status` 改为 `mixed`，页面保留当前 `status`，写清分歧维度和仍需验证的问题。
+- 时间敏感：提高 `staleness_risk`，降低推荐语气。
+- 用户不感兴趣：降低优先级，但保留最小索引，避免以后重复当新资源处理。
+
+知识库不追求每个旧页面自动最新。只有当新冲浪再次遇到相关 topic/resource、用户反馈要求复查、或资源验证自然触及它时，才更新对应页面。
+
 ## 反馈同步
 
 反馈同步发生在每次 surfing goal 启动前，不在每批之间重复做。
@@ -1011,6 +1082,8 @@ brainstorming skill 默认要求写 spec 并 commit。用户已确认本设计�
 - spec 定义个人兴趣入口，包含 LinuxDo Scripts JSON。
 - spec 定义 Obsidian 反馈同步。
 - spec 定义不定时巡检的 watchlist。
+- spec 定义轻量热索引、冷历史、`readings_all.json` legacy archive 和按 topic 按需加载规则。
+- spec 定义状态瘦身、归档浓缩和知识库长期维护规则。
 - spec 定义一批一写。
 - spec 定义 frontmatter 和页面模板。
 - 用户 review 并批准 written spec。
