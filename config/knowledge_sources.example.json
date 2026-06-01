@@ -1,0 +1,15 @@
+{
+  "state_root": "state/knowledge",
+  "obsidian_vault_path": "obsidian/linuxdo",
+  "linuxdo_scripts_bookmarks": {
+    "enabled": true,
+    "path": "data/linuxdo/bookmarks.json",
+    "fallback_download_path": "data/linuxdo/bookmarkData.json"
+  },
+  "chrome_context": {
+    "enabled": true
+  },
+  "github_verification": {
+    "enabled": true
+  }
+}

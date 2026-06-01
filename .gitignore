@@ -1,6 +1,8 @@
 # Runtime outputs and local state
 output/
 state/
+.worktrees/
+worktrees/
 
 # Python generated files
 __pycache__/

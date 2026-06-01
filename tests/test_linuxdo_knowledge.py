@@ -1,0 +1,1593 @@
+import importlib.util
+import json
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SURF_PATH = ROOT / "tools" / "linuxdo_surf.py"
+surf_spec = importlib.util.spec_from_file_location("linuxdo_surf", SURF_PATH)
+linuxdo_surf = importlib.util.module_from_spec(surf_spec)
+surf_spec.loader.exec_module(linuxdo_surf)
+
+
+class TemporaryDirectoryPath:
+    def __enter__(self):
+        from tempfile import TemporaryDirectory
+
+        self._temporary_directory = TemporaryDirectory()
+        return Path(self._temporary_directory.name)
+
+    def __exit__(self, exc_type, exc, traceback):
+        self._temporary_directory.cleanup()
+
+
+class KnowledgeConfigAndStateTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=tmp_path / "bookmarks.json",
+            fallback_bookmark_path=tmp_path / "bookmarkData.json",
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def test_load_config_rejects_secret_like_credentials_anywhere(self):
+        from tools.linuxdo_knowledge.config import load_config
+
+        forbidden_keys = [
+            "webdav_password",
+            "webdav_token",
+            "webdav_username",
+            "webdav_account",
+            "password",
+            "token",
+        ]
+
+        with TemporaryDirectoryPath() as tmp_path:
+            for key in forbidden_keys:
+                config_path = tmp_path / f"{key}.json"
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "obsidian_vault_path": str(tmp_path / "vault"),
+                            "nested": [{"source": {key: "must-not-be-here"}}],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                with self.subTest(key=key):
+                    with self.assertRaisesRegex(ValueError, "WebDAV"):
+                        load_config(config_path)
+
+    def test_load_config_rejects_string_booleans_and_ignores_blank_optional_paths(self):
+        from tools.linuxdo_knowledge.config import load_config
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "knowledge_sources.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "linuxdo_scripts_bookmarks": {
+                            "path": "   ",
+                            "fallback_download_path": "\t",
+                        },
+                        "chrome_context": {"enabled": "false"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "chrome_context.enabled"):
+                load_config(config_path)
+
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "linuxdo_scripts_bookmarks": {
+                            "path": "   ",
+                            "fallback_download_path": "\t",
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertIsNone(config.bookmark_path)
+        self.assertIsNone(config.fallback_bookmark_path)
+
+    def test_load_config_stores_bookmark_enabled_flag(self):
+        from tools.linuxdo_knowledge.config import load_config
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "knowledge_sources.json"
+            config_path.write_text(
+                json.dumps({"linuxdo_scripts_bookmarks": {"enabled": False}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertFalse(config.bookmark_enabled)
+
+    def test_ensure_knowledge_state_creates_hot_indexes_and_directories(self):
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+
+            ensure_knowledge_state(config)
+
+            state_root = tmp_path / "state" / "knowledge"
+            expected_json = {
+                "topic_index.json": {"topics": {}},
+                "topic_update_state.json": {"topics": {}},
+                "resource_index.json": {"resources": {}},
+                "claim_index.json": {"claims": {}},
+                "feedback_sync_state.json": {"last_sync_at": None, "files": {}},
+                "user_feedback.json": {"items": []},
+                "frontier_queue.json": {"items": []},
+                "bookmark_source_index.json": {"bookmarks": {}},
+            }
+            for filename, expected in expected_json.items():
+                with self.subTest(filename=filename):
+                    self.assertEqual(json.loads((state_root / filename).read_text(encoding="utf-8")), expected)
+
+            self.assertEqual((state_root / "session_log.jsonl").read_text(encoding="utf-8"), "")
+            self.assertTrue((state_root / "topic_summaries").is_dir())
+            self.assertTrue((state_root / "evidence_shards").is_dir())
+            self.assertTrue((state_root / "archive").is_dir())
+
+    def test_load_hot_indexes_ignores_corrupt_cold_history(self):
+        from tools.linuxdo_knowledge.state import load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            cold_history = config.state_root / "readings_all.json"
+            cold_history.parent.mkdir(parents=True)
+            cold_history.write_text("{invalid json", encoding="utf-8")
+
+            indexes = load_hot_indexes(config)
+
+        self.assertEqual(
+            indexes,
+            {
+                "topic_index": {"topics": {}},
+                "topic_update_state": {"topics": {}},
+                "resource_index": {"resources": {}},
+                "claim_index": {"claims": {}},
+                "feedback_sync_state": {"last_sync_at": None, "files": {}},
+                "user_feedback": {"items": []},
+                "frontier_queue": {"items": []},
+                "bookmark_source_index": {"bookmarks": {}},
+            },
+        )
+
+    def test_save_hot_index_writes_known_index_and_rejects_unknown_name(self):
+        from tools.linuxdo_knowledge.state import save_hot_index
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            path = save_hot_index(config, "topic_index", {"topics": {"7": {"title": "known"}}})
+
+            with self.assertRaisesRegex(ValueError, "unknown hot index"):
+                save_hot_index(config, "readings_all", {})
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+            cold_history_exists = (config.state_root / "readings_all.json").exists()
+
+        self.assertEqual(path, config.state_root / "topic_index.json")
+        self.assertEqual(data, {"topics": {"7": {"title": "known"}}})
+        self.assertFalse(cold_history_exists)
+
+    def test_upsert_topic_summary_merges_fields_and_updates_timestamp(self):
+        from tools.linuxdo_knowledge.state import topic_summary_path, upsert_topic_summary
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            path = topic_summary_path(config, "42")
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "topic_id": 42,
+                        "title": "old title",
+                        "kept": "yes",
+                        "updated_at": "2026-01-01T00:00:00+00:00",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            written_path = upsert_topic_summary(config, "42", {"title": "new title", "tags": ["ai"]})
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(written_path, path)
+        self.assertEqual(data["topic_id"], 42)
+        self.assertEqual(data["title"], "new title")
+        self.assertEqual(data["kept"], "yes")
+        self.assertEqual(data["tags"], ["ai"])
+        self.assertNotEqual(data["updated_at"], "2026-01-01T00:00:00+00:00")
+
+    def test_append_evidence_writes_observed_month_jsonl(self):
+        from tools.linuxdo_knowledge.state import append_evidence
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            written_path = append_evidence(
+                config,
+                {"topic_id": 7, "claim": "useful"},
+                observed_at="2026-05-12T08:09:10+00:00",
+            )
+            line = written_path.read_text(encoding="utf-8").strip()
+            item = json.loads(line)
+
+        self.assertEqual(written_path, config.state_root / "evidence_shards" / "2026-05.jsonl")
+        self.assertEqual(item, {"topic_id": 7, "claim": "useful", "observed_at": "2026-05-12T08:09:10+00:00"})
+
+    def test_append_evidence_rejects_invalid_observed_at_without_weird_shard(self):
+        from tools.linuxdo_knowledge.state import append_evidence
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+
+            with self.assertRaisesRegex(ValueError, "observed_at"):
+                append_evidence(config, {"topic_id": 7}, observed_at="../../bad")
+
+            shard_paths = list((config.state_root / "evidence_shards").glob("*.jsonl"))
+
+        self.assertEqual(shard_paths, [])
+
+    def test_append_evidence_appends_multiple_lines_for_same_month(self):
+        from tools.linuxdo_knowledge.state import append_evidence
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            first_path = append_evidence(config, {"topic_id": 1}, observed_at="2026-05-01T00:00:00+00:00")
+            second_path = append_evidence(config, {"topic_id": 2}, observed_at="2026-05-31T23:59:59+00:00")
+            lines = first_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(first_path, second_path)
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[0])["topic_id"], 1)
+        self.assertEqual(json.loads(lines[1])["topic_id"], 2)
+
+    def test_cli_knowledge_init_uses_config_and_creates_state(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "obsidian_vault_path": "vault",
+                        "linuxdo_scripts_bookmarks": {
+                            "enabled": True,
+                            "path": "bookmarks.json",
+                            "fallback_download_path": "bookmarkData.json",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = linuxdo_surf.main(["knowledge-init", "--config", str(config_path)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((tmp_path / "state" / "knowledge" / "topic_index.json").exists())
+            self.assertTrue((tmp_path / "state" / "knowledge" / "session_log.jsonl").exists())
+
+    def test_script_knowledge_init_uses_config_and_creates_state(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps({"obsidian_vault_path": "vault"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SURF_PATH),
+                    "knowledge-init",
+                    "--config",
+                    str(config_path),
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((tmp_path / "state" / "knowledge" / "topic_index.json").exists())
+
+
+class BookmarkSyncTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path, *, bookmark_path=None, fallback_bookmark_path=None, bookmark_enabled=True):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=bookmark_path if bookmark_path is not None else tmp_path / "bookmarks.json",
+            fallback_bookmark_path=fallback_bookmark_path
+            if fallback_bookmark_path is not None
+            else tmp_path / "bookmarkData.json",
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+            bookmark_enabled=bookmark_enabled,
+        )
+
+    def bookmark_export(self, *, title="某 skill 讨论", tags=None, cate="开发调优", folder="Skills / Plugins"):
+        return [
+            {
+                "id": 0,
+                "name": folder,
+                "list": [
+                    {
+                        "cate": cate,
+                        "tags": ["skill", "实测"] if tags is None else tags,
+                        "timestamp": 1780151443336,
+                        "title": title,
+                        "url": "https://linux.do/t/topic/2273499",
+                    }
+                ],
+            }
+        ]
+
+    def write_bookmarks(self, path, data):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def test_parse_bookmark_export_flattens_linuxdo_scripts_shape(self):
+        from tools.linuxdo_knowledge.bookmarks import parse_bookmark_export
+
+        items = parse_bookmark_export(self.bookmark_export())
+
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["folder"], "Skills / Plugins")
+        self.assertEqual(item["cate"], "开发调优")
+        self.assertEqual(item["tags"], ["skill", "实测"])
+        self.assertEqual(item["timestamp"], 1780151443336)
+        self.assertEqual(item["title"], "某 skill 讨论")
+        self.assertEqual(item["url"], "https://linux.do/t/topic/2273499")
+        self.assertEqual(item["topic_id"], 2273499)
+        self.assertRegex(item["content_hash"], r"^[0-9a-f]{64}$")
+
+    def test_extract_topic_id_accepts_topic_and_slug_urls(self):
+        from tools.linuxdo_knowledge.bookmarks import extract_topic_id
+
+        self.assertEqual(extract_topic_id("https://linux.do/t/topic/2273499"), 2273499)
+        self.assertEqual(extract_topic_id("https://linux.do/t/some-slug/2273499"), 2273499)
+        self.assertIsNone(extract_topic_id("https://linux.do/u/someone"))
+
+    def test_sync_bookmarks_adds_new_bookmark_to_index_and_frontier(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_bookmarks(config.bookmark_path, self.bookmark_export())
+
+            counts = sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+
+            bookmark_index = json.loads((config.state_root / "bookmark_source_index.json").read_text(encoding="utf-8"))
+            frontier = json.loads((config.state_root / "frontier_queue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(counts, {"new": 1, "metadata_changed": 0, "unchanged": 0})
+        bookmark = bookmark_index["bookmarks"]["https://linux.do/t/topic/2273499"]
+        self.assertEqual(bookmark["title"], "某 skill 讨论")
+        self.assertEqual(bookmark["last_seen_at"], "2026-06-01T00:00:00+00:00")
+        self.assertEqual(len(frontier["items"]), 1)
+        self.assertEqual(frontier["items"][0]["source"], "linuxdo_scripts_bookmark")
+        self.assertEqual(frontier["items"][0]["topic_id"], 2273499)
+        self.assertEqual(frontier["items"][0]["folder"], "Skills / Plugins")
+        self.assertEqual(frontier["items"][0]["tags"], ["skill", "实测"])
+
+    def test_sync_bookmarks_reuses_existing_frontier_item_when_bookmark_index_is_missing(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_bookmarks(config.bookmark_path, self.bookmark_export())
+            ensure_knowledge_state(config)
+            (config.state_root / "frontier_queue.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "url": "https://linux.do/t/topic/2273499",
+                                "title": "旧 frontier 标题",
+                                "source": "manual",
+                                "created_at": "2026-05-31T00:00:00+00:00",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (config.state_root / "bookmark_source_index.json").write_text(
+                json.dumps({"bookmarks": {}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            counts = sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+
+            bookmark_index = json.loads((config.state_root / "bookmark_source_index.json").read_text(encoding="utf-8"))
+            frontier = json.loads((config.state_root / "frontier_queue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(counts, {"new": 1, "metadata_changed": 0, "unchanged": 0})
+        self.assertIn("https://linux.do/t/topic/2273499", bookmark_index["bookmarks"])
+        self.assertEqual(len(frontier["items"]), 1)
+        self.assertEqual(frontier["items"][0]["title"], "某 skill 讨论")
+        self.assertEqual(frontier["items"][0]["created_at"], "2026-05-31T00:00:00+00:00")
+
+    def test_sync_bookmarks_unchanged_updates_last_seen_without_duplicate_frontier_item(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_bookmarks(config.bookmark_path, self.bookmark_export())
+            sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+
+            counts = sync_bookmarks(config, seen_at="2026-06-02T00:00:00+00:00")
+
+            bookmark_index = json.loads((config.state_root / "bookmark_source_index.json").read_text(encoding="utf-8"))
+            frontier = json.loads((config.state_root / "frontier_queue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(counts, {"new": 0, "metadata_changed": 0, "unchanged": 1})
+        self.assertEqual(bookmark_index["bookmarks"]["https://linux.do/t/topic/2273499"]["last_seen_at"], "2026-06-02T00:00:00+00:00")
+        self.assertEqual(len(frontier["items"]), 1)
+
+    def test_sync_bookmarks_metadata_change_updates_index_and_bumps_frontier_item(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_bookmarks(config.bookmark_path, self.bookmark_export())
+            sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+            self.write_bookmarks(
+                config.bookmark_path,
+                self.bookmark_export(title="更新后的 skill 讨论", tags=["plugin"], cate="工具评测", folder="Inbox"),
+            )
+
+            counts = sync_bookmarks(config, seen_at="2026-06-03T00:00:00+00:00")
+
+            bookmark_index = json.loads((config.state_root / "bookmark_source_index.json").read_text(encoding="utf-8"))
+            frontier = json.loads((config.state_root / "frontier_queue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(counts, {"new": 0, "metadata_changed": 1, "unchanged": 0})
+        bookmark = bookmark_index["bookmarks"]["https://linux.do/t/topic/2273499"]
+        self.assertEqual(bookmark["title"], "更新后的 skill 讨论")
+        self.assertEqual(bookmark["folder"], "Inbox")
+        self.assertEqual(len(frontier["items"]), 1)
+        self.assertEqual(frontier["items"][0]["title"], "更新后的 skill 讨论")
+        self.assertEqual(frontier["items"][0]["folder"], "Inbox")
+        self.assertEqual(frontier["items"][0]["tags"], ["plugin"])
+        self.assertEqual(frontier["items"][0]["updated_at"], "2026-06-03T00:00:00+00:00")
+
+    def test_sync_bookmarks_disabled_returns_zeros_and_does_not_read_file(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(
+                tmp_path,
+                bookmark_path=tmp_path / "invalid.json",
+                fallback_bookmark_path=None,
+                bookmark_enabled=False,
+            )
+            config.bookmark_path.write_text("{not json", encoding="utf-8")
+
+            counts = sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+
+        self.assertEqual(counts, {"new": 0, "metadata_changed": 0, "unchanged": 0})
+
+    def test_sync_bookmarks_uses_fallback_when_configured_path_is_missing(self):
+        from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+
+        with TemporaryDirectoryPath() as tmp_path:
+            fallback_path = tmp_path / "downloads" / "bookmarkData.json"
+            config = self.knowledge_config(
+                tmp_path,
+                bookmark_path=tmp_path / "missing.json",
+                fallback_bookmark_path=fallback_path,
+            )
+            self.write_bookmarks(fallback_path, self.bookmark_export())
+
+            counts = sync_bookmarks(config, seen_at="2026-06-01T00:00:00+00:00")
+
+            frontier = json.loads((config.state_root / "frontier_queue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(counts, {"new": 1, "metadata_changed": 0, "unchanged": 0})
+        self.assertEqual(frontier["items"][0]["url"], "https://linux.do/t/topic/2273499")
+
+
+class ObsidianVaultTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=None,
+            fallback_bookmark_path=None,
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def test_scaffold_vault_creates_directories_and_missing_docs(self):
+        from tools.linuxdo_knowledge.obsidian import scaffold_vault
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            existing_agents = config.obsidian_vault_path / "AGENTS.md"
+            existing_agents.parent.mkdir(parents=True)
+            existing_agents.write_text("custom agent rules\n", encoding="utf-8")
+
+            scaffold_vault(config)
+
+            expected_dirs = [
+                "wiki/concepts",
+                "wiki/practices",
+                "wiki/drafts",
+                "wiki/notes",
+                "catalog/resources",
+                "catalog/candidates",
+                "catalog/comparisons",
+                "catalog/workflows",
+                "catalog/categories",
+                "catalog/archive",
+                "inbox/sessions",
+                "raw",
+            ]
+            for relative_path in expected_dirs:
+                with self.subTest(relative_path=relative_path):
+                    self.assertTrue((config.obsidian_vault_path / relative_path).is_dir())
+
+            self.assertTrue((config.obsidian_vault_path / "CLAUDE.md").is_file())
+            self.assertTrue((config.obsidian_vault_path / "index.md").is_file())
+            self.assertTrue((config.obsidian_vault_path / "log.md").is_file())
+            self.assertEqual(existing_agents.read_text(encoding="utf-8"), "custom agent rules\n")
+
+            claude_text = (config.obsidian_vault_path / "CLAUDE.md").read_text(encoding="utf-8")
+
+        self.assertIn("knowledge rules", claude_text)
+        self.assertIn("## 我的反馈", claude_text)
+        self.assertIn("Preserve", claude_text)
+
+    def test_scaffold_vault_agents_mentions_knowledge_rules_and_feedback(self):
+        from tools.linuxdo_knowledge.obsidian import scaffold_vault
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+
+            scaffold_vault(config)
+
+            agents_text = (config.obsidian_vault_path / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("knowledge rules", agents_text)
+        self.assertIn("## 我的反馈", agents_text)
+        self.assertIn("Preserve", agents_text)
+
+    def test_write_page_writes_frontmatter_title_sections_and_feedback_heading(self):
+        from tools.linuxdo_knowledge.obsidian import FEEDBACK_HEADING, write_page
+
+        with TemporaryDirectoryPath() as tmp_path:
+            path = tmp_path / "vault" / "catalog" / "resources" / "demo.md"
+
+            write_page(
+                path,
+                {"title": "Demo", "draft": False, "tags": ["ai", "linux.do"], "score": 3},
+                "Demo",
+                [("摘要", "这是摘要。"), ("链接", "- https://linux.do/t/topic/1")],
+            )
+
+            text = path.read_text(encoding="utf-8")
+
+        self.assertTrue(text.startswith("---\n"))
+        self.assertIn("title: Demo\n", text)
+        self.assertIn("draft: false\n", text)
+        self.assertIn("tags:\n  - ai\n  - linux.do\n", text)
+        self.assertIn("score: 3\n", text)
+        self.assertIn("# Demo\n", text)
+        self.assertIn("## 摘要\n\n这是摘要。\n", text)
+        self.assertIn("## 链接\n\n- https://linux.do/t/topic/1\n", text)
+        self.assertIn(f"{FEEDBACK_HEADING}\n", text)
+
+    def test_write_page_preserves_existing_feedback_when_rewriting_agent_sections(self):
+        from tools.linuxdo_knowledge.obsidian import FEEDBACK_HEADING, write_page
+
+        with TemporaryDirectoryPath() as tmp_path:
+            path = tmp_path / "vault" / "wiki" / "notes" / "demo.md"
+            write_page(path, {"title": "Old"}, "Old", [("旧摘要", "旧内容")])
+            feedback_after_heading = "\n\n用户第一行\n- 保留这个列表\n\n"
+            path.write_text(path.read_text(encoding="utf-8") + "\n用户第一行\n- 保留这个列表\n\n", encoding="utf-8")
+
+            write_page(path, {"title": "New"}, "New", [("新摘要", "新内容")])
+
+            text = path.read_text(encoding="utf-8")
+            preserved_feedback = text.split(FEEDBACK_HEADING, 1)[1]
+
+        self.assertIn("# New\n", text)
+        self.assertIn("## 新摘要\n\n新内容\n", text)
+        self.assertNotIn("旧摘要", text)
+        self.assertEqual(preserved_feedback, feedback_after_heading)
+
+    def test_write_page_preserves_feedback_spacing_at_end(self):
+        from tools.linuxdo_knowledge.obsidian import FEEDBACK_HEADING, write_page
+
+        with TemporaryDirectoryPath() as tmp_path:
+            path = tmp_path / "vault" / "wiki" / "notes" / "demo.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "---\ntitle: Old\n---\n\n# Old\n\n## 旧摘要\n\n旧内容\n\n## 我的反馈\n\n第一行\n\n第二段\n",
+                encoding="utf-8",
+            )
+
+            write_page(path, {"title": "New"}, "New", [("新摘要", "新内容")])
+
+            text = path.read_text(encoding="utf-8")
+
+        self.assertNotIn("旧摘要", text)
+        self.assertTrue(text.endswith(f"{FEEDBACK_HEADING}\n\n第一行\n\n第二段\n"))
+
+    def test_page_path_for_maps_types_and_safe_filename_removes_invalid_characters(self):
+        from tools.linuxdo_knowledge.obsidian import page_path_for, safe_filename
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+
+            cases = {
+                "resource": "catalog/resources",
+                "candidate": "catalog/candidates",
+                "comparison": "catalog/comparisons",
+                "workflow": "catalog/workflows",
+                "category": "catalog/categories",
+                "archive": "catalog/archive",
+                "concept": "wiki/concepts",
+                "practice": "wiki/practices",
+                "draft": "wiki/drafts",
+                "note": "wiki/notes",
+                "session": "inbox/sessions",
+            }
+            for page_type, directory in cases.items():
+                with self.subTest(page_type=page_type):
+                    path = page_path_for(config, page_type, " Bad / Name:* ?<>|  ")
+                    self.assertEqual(path, config.obsidian_vault_path / directory / "Bad-Name.md")
+
+        self.assertEqual(safe_filename(" a\t b \n c "), "a-b-c")
+        self.assertEqual(safe_filename(":/\\*?\"<>|"), "untitled")
+
+    def test_append_log_appends_without_destroying_existing_log(self):
+        from tools.linuxdo_knowledge.obsidian import append_log
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            log_path = config.obsidian_vault_path / "log.md"
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text("first\n", encoding="utf-8")
+
+            append_log(config, "second")
+            append_log(config, "third")
+
+            text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(text, "first\nsecond\nthird\n")
+
+
+class ReadingStrategyTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=None,
+            fallback_bookmark_path=None,
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def write_hot_index(self, config, name, data):
+        path = config.state_root / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def test_decide_reading_plan_skips_unchanged_read_topic(self):
+        from tools.linuxdo_knowledge.strategy import decide_reading_plan
+
+        plan = decide_reading_plan(
+            {"title": "Codex 工作流", "reply_count": 10, "last_activity_at": "2026-06-01T10:00:00+00:00"},
+            {"read_reply_count": 10, "last_activity_at": "2026-06-01T10:00:00+00:00"},
+        )
+
+        self.assertEqual(plan["level"], 0)
+        self.assertEqual(plan["action"], "skip")
+        self.assertIn("unchanged", plan["skip_reason"])
+
+    def test_decide_reading_plan_watchlist_new_replies_reads_incremental_level_2(self):
+        from tools.linuxdo_knowledge.strategy import decide_reading_plan
+
+        plan = decide_reading_plan(
+            {"title": "Codex 工作流更新", "reply_count": 12, "last_activity_at": "2026-06-02T10:00:00+00:00"},
+            {"read_reply_count": 10, "last_activity_at": "2026-06-01T10:00:00+00:00", "watchlist": True},
+        )
+
+        self.assertEqual(plan["level"], 2)
+        self.assertEqual(plan["action"], "read_incremental")
+        self.assertEqual(plan["skip_reason"], "")
+
+    def test_decide_reading_plan_high_signal_words_upgrade_to_level_2(self):
+        from tools.linuxdo_knowledge.strategy import decide_reading_plan
+
+        signal_titles = ["实测某工具", "踩坑记录", "替代方案", "不推荐使用", "更新了", "解决了报错", "对比结果", "争议讨论"]
+
+        for title in signal_titles:
+            with self.subTest(title=title):
+                plan = decide_reading_plan({"title": title, "reply_count": 1})
+                self.assertEqual(plan["level"], 2)
+                self.assertEqual(plan["action"], "read")
+
+    def test_decide_reading_plan_low_value_terms_can_metadata_only(self):
+        from tools.linuxdo_knowledge.strategy import decide_reading_plan
+
+        plan = decide_reading_plan({"title": "今日签到水贴闲聊", "reply_count": 0})
+
+        self.assertEqual(plan["level"], 0)
+        self.assertEqual(plan["action"], "metadata_only")
+        self.assertIn("low_value", plan["skip_reason"])
+
+    def test_decide_reading_plan_requires_render_for_visual_ui_signals(self):
+        from tools.linuxdo_knowledge.strategy import decide_reading_plan
+
+        signal_text = "如图 看图 截图 效果如下 UI WebUI 按钮 报错图"
+        plan = decide_reading_plan({"title": "界面问题", "first_text": signal_text})
+
+        self.assertTrue(plan["render_required"])
+
+    def test_build_knowledge_task_uses_hot_indexes_sorts_and_ignores_corrupt_cold_history(self):
+        from tools.linuxdo_knowledge.strategy import build_knowledge_task
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            (config.state_root / "readings_all.json").parent.mkdir(parents=True)
+            (config.state_root / "readings_all.json").write_text("{not valid json", encoding="utf-8")
+            self.write_hot_index(
+                config,
+                "frontier_queue",
+                {
+                    "items": [
+                        {
+                            "url": "https://linux.do/t/topic/9",
+                            "title": "Z topic",
+                            "priority": 20,
+                            "reply_count": 1,
+                            "suggested_level": 1,
+                        },
+                        {
+                            "url": "https://linux.do/t/topic/8",
+                            "title": "A topic",
+                            "priority": 90,
+                            "reply_count": 2,
+                            "suggested_level": 1,
+                        },
+                        {
+                            "url": "https://linux.do/t/topic/7",
+                            "title": "B topic",
+                            "priority": 90,
+                            "reply_count": 3,
+                            "suggested_level": 2,
+                        },
+                    ]
+                },
+            )
+
+            task = build_knowledge_task(config, batch_size=2, created_at="2026-06-01T12:00:00+00:00")
+
+        self.assertEqual(task["created_at"], "2026-06-01T12:00:00+00:00")
+        self.assertEqual(task["source"], "knowledge_frontier_queue")
+        self.assertEqual(task["extraction_policy"], "dom_text_first_render_on_demand")
+        self.assertEqual(task["history_policy"], "load_hot_indexes_only")
+        self.assertEqual([item["topic_id"] for item in task["items"]], [8, 7])
+        self.assertEqual([item["title"] for item in task["items"]], ["A topic", "B topic"])
+        self.assertEqual(task["items"][0]["reading_level"], 1)
+        for key in [
+            "topic_id",
+            "title",
+            "url",
+            "reading_level",
+            "action",
+            "skip_reason",
+            "render_required",
+            "render_policy",
+            "reply_policy",
+        ]:
+            self.assertIn(key, task["items"][0])
+
+    def test_build_knowledge_task_uses_topic_update_state_for_skip_and_incremental(self):
+        from tools.linuxdo_knowledge.strategy import build_knowledge_task
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_hot_index(
+                config,
+                "frontier_queue",
+                {
+                    "items": [
+                        {
+                            "topic_id": 1,
+                            "url": "https://linux.do/t/topic/1",
+                            "title": "已读帖",
+                            "priority": 80,
+                            "reply_count": 5,
+                            "last_activity_at": "2026-06-01T10:00:00+00:00",
+                        },
+                        {
+                            "topic_id": 2,
+                            "url": "https://linux.do/t/topic/2",
+                            "title": "关注帖",
+                            "priority": 70,
+                            "reply_count": 8,
+                            "last_activity_at": "2026-06-02T10:00:00+00:00",
+                        },
+                    ]
+                },
+            )
+            self.write_hot_index(
+                config,
+                "topic_update_state",
+                {
+                    "topics": {
+                        "1": {"read_reply_count": 5, "last_activity_at": "2026-06-01T10:00:00+00:00"},
+                        "2": {
+                            "read_reply_count": 6,
+                            "last_activity_at": "2026-06-01T10:00:00+00:00",
+                            "watchlist": True,
+                        },
+                    }
+                },
+            )
+
+            task = build_knowledge_task(config, batch_size=20, created_at="2026-06-01T12:00:00+00:00")
+
+        self.assertEqual(task["items"][0]["reading_level"], 0)
+        self.assertEqual(task["items"][0]["action"], "skip")
+        self.assertIn("unchanged", task["items"][0]["skip_reason"])
+        self.assertEqual(task["items"][1]["reading_level"], 2)
+        self.assertEqual(task["items"][1]["action"], "read_incremental")
+
+    def test_build_knowledge_task_skips_deprioritized_and_archived_topics(self):
+        from tools.linuxdo_knowledge.strategy import build_knowledge_task
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            self.write_hot_index(
+                config,
+                "frontier_queue",
+                {
+                    "items": [
+                        {"topic_id": 1, "title": "降权帖", "priority": 100},
+                        {"topic_id": 2, "title": "归档帖", "priority": 90},
+                        {"topic_id": 3, "title": "可读帖", "priority": 80},
+                    ]
+                },
+            )
+            self.write_hot_index(
+                config,
+                "topic_index",
+                {
+                    "topics": {
+                        "1": {"topic_id": 1, "status": "deprioritized"},
+                        "2": {"topic_id": 2, "status": "archived"},
+                        "3": {"topic_id": 3, "status": "active"},
+                    }
+                },
+            )
+
+            task = build_knowledge_task(config, batch_size=20, created_at="2026-06-01T12:00:00+00:00")
+
+        self.assertEqual([item["topic_id"] for item in task["items"]], [3])
+
+
+class SessionIngestionTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=None,
+            fallback_bookmark_path=None,
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def test_ingest_session_updates_state_and_writes_obsidian_pages(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            task = {
+                "created_at": "2026-06-01T12:00:00+00:00",
+                "items": [
+                    {
+                        "topic_id": 123,
+                        "title": "Codex workflow",
+                        "url": "https://linux.do/t/topic/123",
+                    }
+                ],
+            }
+            readings = {
+                "readings": [
+                    {
+                        "topic_id": 123,
+                        "title": "Codex workflow",
+                        "url": "https://linux.do/t/topic/123",
+                        "summary": "讨论长任务上下文预算。",
+                        "value_level": "high",
+                        "tags": ["workflow"],
+                        "reply_count": 12,
+                        "last_activity_at": "2026-06-01T11:00:00+00:00",
+                        "highest_post_number": 18,
+                        "highest_post_id": 98765,
+                        "read_ranges": [{"from": 1, "to": 18}],
+                        "content_fingerprint": "topic-fingerprint-1",
+                        "resources": [
+                            {
+                                "id": "candidate:codex-workflow",
+                                "name": "Codex Workflow",
+                                "status": "candidate",
+                                "capture_reason": "多人讨论上下文预算。",
+                                "summary": "这段长摘要不应该进入热索引。" * 20,
+                                "evidence": ["长证据不进入热索引"],
+                            }
+                        ],
+                        "claims": [
+                            {
+                                "id": "claim:context-budget",
+                                "text": "长任务需要轻量索引",
+                                "summary": "长 claim 解释也不应该进入热索引。" * 20,
+                            }
+                        ],
+                        "evidence": [
+                            {
+                                "summary": "回复支持只读新增楼层。",
+                                "evidence_status": "supporting",
+                            }
+                        ],
+                        "comparisons": [
+                            {
+                                "id": "comparison:workflow-tools",
+                                "name": "Workflow Tools",
+                                "summary": "按 token 成本和反馈闭环比较。",
+                            }
+                        ],
+                        "workflows": [
+                            {
+                                "id": "workflow:linuxdo-obsidian",
+                                "name": "Linux.do Obsidian Workflow",
+                                "summary": "冲浪后写入 Obsidian。",
+                            }
+                        ],
+                        "knowledge_drafts": [
+                            {
+                                "id": "draft:lightweight-index",
+                                "name": "轻量索引",
+                                "summary": "热索引降低重复读取成本。",
+                            }
+                        ],
+                        "categories": [
+                            {
+                                "id": "category:skills",
+                                "name": "skills",
+                                "items": ["Codex Workflow"],
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            result = ingest_session(
+                config,
+                task=task,
+                readings=readings,
+                batch_id="001",
+                observed_at="2026-06-01T12:30:00+00:00",
+            )
+            indexes = load_hot_indexes(config)
+            session_path = config.obsidian_vault_path / "inbox" / "sessions" / "2026-06-01-batch-001.md"
+            candidate_path = config.obsidian_vault_path / "catalog" / "candidates" / "Codex-Workflow.md"
+            comparison_path = config.obsidian_vault_path / "catalog" / "comparisons" / "Workflow-Tools.md"
+            workflow_path = config.obsidian_vault_path / "catalog" / "workflows" / "Linux.do-Obsidian-Workflow.md"
+            draft_path = config.obsidian_vault_path / "wiki" / "drafts" / "轻量索引.md"
+            category_path = config.obsidian_vault_path / "catalog" / "categories" / "skills.md"
+            evidence_path = config.state_root / "evidence_shards" / "2026-06.jsonl"
+            session_exists = session_path.exists()
+            session_text = session_path.read_text(encoding="utf-8") if session_exists else ""
+            candidate_exists = candidate_path.exists()
+            candidate_text = candidate_path.read_text(encoding="utf-8") if candidate_exists else ""
+            comparison_exists = comparison_path.exists()
+            workflow_exists = workflow_path.exists()
+            draft_exists = draft_path.exists()
+            category_exists = category_path.exists()
+            evidence_text = evidence_path.read_text(encoding="utf-8") if evidence_path.exists() else ""
+
+        self.assertEqual(result["readings"], 1)
+        self.assertIn("123", indexes["topic_index"]["topics"])
+        self.assertEqual(indexes["topic_update_state"]["topics"]["123"]["read_reply_count"], 12)
+        self.assertEqual(indexes["topic_update_state"]["topics"]["123"]["highest_post_number"], 18)
+        self.assertEqual(indexes["topic_update_state"]["topics"]["123"]["highest_post_id"], 98765)
+        self.assertEqual(indexes["topic_update_state"]["topics"]["123"]["read_ranges"], [{"from": 1, "to": 18}])
+        self.assertEqual(indexes["topic_update_state"]["topics"]["123"]["content_fingerprint"], "topic-fingerprint-1")
+        self.assertIn("candidate:codex-workflow", indexes["resource_index"]["resources"])
+        self.assertNotIn("summary", indexes["resource_index"]["resources"]["candidate:codex-workflow"])
+        self.assertNotIn("evidence", indexes["resource_index"]["resources"]["candidate:codex-workflow"])
+        self.assertIn("claim:context-budget", indexes["claim_index"]["claims"])
+        self.assertNotIn("summary", indexes["claim_index"]["claims"]["claim:context-budget"])
+        self.assertTrue(session_exists)
+        self.assertIn("Codex workflow", session_text)
+        self.assertTrue(candidate_exists)
+        self.assertIn("## 为什么被抓到", candidate_text)
+        self.assertTrue(comparison_exists)
+        self.assertTrue(workflow_exists)
+        self.assertTrue(draft_exists)
+        self.assertTrue(category_exists)
+        self.assertIn("只读新增楼层", evidence_text)
+
+    def test_knowledge_session_cli_writes_result_file(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "obsidian_vault_path": str(config.obsidian_vault_path),
+                        "state_root": str(config.state_root),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            task_path = tmp_path / "task.json"
+            readings_path = tmp_path / "readings.json"
+            output_path = tmp_path / "result.json"
+            task_path.write_text(json.dumps({"items": []}), encoding="utf-8")
+            readings_path.write_text(json.dumps({"readings": []}), encoding="utf-8")
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "knowledge-session",
+                    "--config",
+                    str(config_path),
+                    "--task",
+                    str(task_path),
+                    "--readings",
+                    str(readings_path),
+                    "--batch-id",
+                    "002",
+                    "--output",
+                    str(output_path),
+                ]
+            )
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result, {"readings": 0})
+
+    def test_ingest_session_updates_existing_obsidian_page_by_frontmatter_id(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            existing_path = config.obsidian_vault_path / "catalog" / "archive" / "Human-Renamed.md"
+            existing_path.parent.mkdir(parents=True)
+            existing_path.write_text(
+                "---\nid: \"candidate:codex-workflow\"\ntype: candidate\nstatus: candidate\n---\n\n"
+                "# Human Renamed\n\n## 旧区块\n\n旧内容\n\n## 我的反馈\n\n人写的反馈\n",
+                encoding="utf-8",
+            )
+            readings = {
+                "readings": [
+                    {
+                        "topic_id": 123,
+                        "title": "Codex workflow",
+                        "url": "https://linux.do/t/topic/123",
+                        "resources": [
+                            {
+                                "id": "candidate:codex-workflow",
+                                "name": "Codex Workflow New Name",
+                                "status": "candidate",
+                                "capture_reason": "新证据。",
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            ingest_session(config, task={"items": []}, readings=readings, batch_id="003", observed_at="2026-06-01T12:30:00+00:00")
+            existing_text = existing_path.read_text(encoding="utf-8")
+            duplicate_path_exists = (config.obsidian_vault_path / "catalog" / "candidates" / "Codex-Workflow-New-Name.md").exists()
+
+        self.assertIn("# Codex Workflow New Name", existing_text)
+        self.assertIn("新证据", existing_text)
+        self.assertIn("## 我的反馈\n\n人写的反馈\n", existing_text)
+        self.assertFalse(duplicate_path_exists)
+
+    def test_ingest_session_sparse_updates_preserve_hot_index_state(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes, save_hot_index
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            save_hot_index(
+                config,
+                "topic_index",
+                {
+                    "topics": {
+                        "123": {
+                            "topic_id": 123,
+                            "title": "Codex workflow",
+                            "url": "https://linux.do/t/topic/123",
+                            "status": "active",
+                            "watchlist": True,
+                            "value_level": "high",
+                            "resource_ids": ["candidate:codex-workflow"],
+                            "claim_ids": ["claim:context-budget"],
+                        }
+                    }
+                },
+            )
+            save_hot_index(
+                config,
+                "topic_update_state",
+                {
+                    "topics": {
+                        "123": {
+                            "topic_id": 123,
+                            "highest_post_number": 18,
+                            "highest_post_id": 98765,
+                            "read_ranges": [{"from": 1, "to": 18}],
+                            "content_fingerprint": "topic-fingerprint-1",
+                        }
+                    }
+                },
+            )
+            save_hot_index(
+                config,
+                "resource_index",
+                {
+                    "resources": {
+                        "candidate:codex-workflow": {
+                            "id": "candidate:codex-workflow",
+                            "name": "Codex Workflow",
+                            "github_url": "https://github.com/example/workflow",
+                            "category": "skill",
+                            "evidence_status": "supporting",
+                        }
+                    }
+                },
+            )
+            save_hot_index(
+                config,
+                "claim_index",
+                {
+                    "claims": {
+                        "claim:context-budget": {
+                            "id": "claim:context-budget",
+                            "text": "长任务需要轻量索引",
+                            "evidence_status": "supporting",
+                        }
+                    }
+                },
+            )
+
+            ingest_session(
+                config,
+                task={"items": []},
+                readings={
+                    "readings": [
+                        {
+                            "topic_id": 123,
+                            "title": "Codex workflow",
+                            "reply_count": 19,
+                            "resources": [{"id": "candidate:codex-workflow", "name": "Codex Workflow"}],
+                            "claims": [{"id": "claim:context-budget", "text": "长任务需要轻量索引"}],
+                        }
+                    ]
+                },
+                batch_id="004",
+                observed_at="2026-06-01T12:30:00+00:00",
+            )
+            indexes = load_hot_indexes(config)
+            topic_index_state = indexes["topic_index"]["topics"]["123"]
+            topic_state = indexes["topic_update_state"]["topics"]["123"]
+            resource_state = indexes["resource_index"]["resources"]["candidate:codex-workflow"]
+            claim_state = indexes["claim_index"]["claims"]["claim:context-budget"]
+
+        self.assertTrue(topic_index_state["watchlist"])
+        self.assertEqual(topic_index_state["status"], "active")
+        self.assertEqual(topic_index_state["value_level"], "high")
+        self.assertEqual(topic_index_state["url"], "https://linux.do/t/topic/123")
+        self.assertEqual(topic_index_state["resource_ids"], ["candidate:codex-workflow"])
+        self.assertEqual(topic_index_state["claim_ids"], ["claim:context-budget"])
+        self.assertEqual(topic_state["read_reply_count"], 19)
+        self.assertEqual(topic_state["highest_post_number"], 18)
+        self.assertEqual(topic_state["highest_post_id"], 98765)
+        self.assertEqual(topic_state["read_ranges"], [{"from": 1, "to": 18}])
+        self.assertEqual(topic_state["content_fingerprint"], "topic-fingerprint-1")
+        self.assertEqual(resource_state["github_url"], "https://github.com/example/workflow")
+        self.assertEqual(resource_state["category"], "skill")
+        self.assertEqual(resource_state["evidence_status"], "supporting")
+        self.assertEqual(claim_state["evidence_status"], "supporting")
+
+    def test_ingest_session_ignores_corrupt_legacy_readings_all(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            legacy_path = config.state_root / "readings_all.json"
+            legacy_path.parent.mkdir(parents=True)
+            legacy_path.write_text("{not valid json", encoding="utf-8")
+
+            result = ingest_session(
+                config,
+                task={"items": []},
+                readings={"readings": []},
+                batch_id="004",
+                observed_at="2026-06-01T12:30:00+00:00",
+            )
+
+        self.assertEqual(result, {"readings": 0})
+
+    def test_ingest_session_counts_skipped_task_items_without_readings(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+        from tools.linuxdo_knowledge.state import load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            result = ingest_session(
+                config,
+                task={
+                    "items": [
+                        {
+                            "topic_id": 123,
+                            "title": "重复帖",
+                            "url": "https://linux.do/t/topic/123",
+                            "action": "skip",
+                            "skip_reason": "unchanged_read_topic",
+                            "reply_count": 12,
+                            "last_activity_at": "2026-06-01T11:00:00+00:00",
+                        },
+                        {
+                            "topic_id": 124,
+                            "title": "低价值帖",
+                            "url": "https://linux.do/t/topic/124",
+                            "action": "metadata_only",
+                            "skip_reason": "low_value_topic",
+                        },
+                    ]
+                },
+                readings={"readings": []},
+                batch_id="006",
+                observed_at="2026-06-01T12:30:00+00:00",
+            )
+            indexes = load_hot_indexes(config)
+            topic_index = indexes["topic_index"]["topics"]
+            topic_update_state = indexes["topic_update_state"]["topics"]
+            summary_exists = (config.state_root / "topic_summaries" / "123.json").exists()
+
+        self.assertEqual(result, {"readings": 0})
+        self.assertEqual(topic_index["123"]["skip_count"], 1)
+        self.assertEqual(topic_index["123"]["skip_reason"], "unchanged_read_topic")
+        self.assertEqual(topic_index["123"]["last_seen_at"], "2026-06-01T12:30:00+00:00")
+        self.assertEqual(topic_index["124"]["skip_count"], 1)
+        self.assertEqual(topic_index["124"]["skip_reason"], "low_value_topic")
+        self.assertEqual(topic_update_state["123"]["reply_count"], 12)
+        self.assertEqual(topic_update_state["123"]["last_activity_at"], "2026-06-01T11:00:00+00:00")
+        self.assertFalse(summary_exists)
+
+    def test_ingest_session_accepts_topics_readings_shape_and_corrupt_hot_indexes(self):
+        from tools.linuxdo_knowledge.session import ingest_session
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            config.state_root.mkdir(parents=True)
+            for name in ("topic_index", "topic_update_state", "resource_index", "claim_index"):
+                (config.state_root / f"{name}.json").write_text("[]", encoding="utf-8")
+
+            result = ingest_session(
+                config,
+                task=[],
+                readings={
+                    "topics": [
+                        {
+                            "topic_id": 123,
+                            "title": "topics shape",
+                            "url": "https://linux.do/t/topic/123",
+                            "resources": [{"id": "candidate:tool", "name": "Tool"}],
+                        }
+                    ]
+                },
+                batch_id="005",
+                observed_at="2026-06-01T12:30:00+00:00",
+            )
+            topic_index = json.loads((config.state_root / "topic_index.json").read_text(encoding="utf-8"))
+            candidate_text = (
+                config.obsidian_vault_path / "catalog" / "candidates" / "Tool.md"
+            ).read_text(encoding="utf-8")
+
+        self.assertEqual(result, {"readings": 1})
+        self.assertIn("123", topic_index["topics"])
+        self.assertIn("status: candidate", candidate_text)
+
+
+class FeedbackSyncTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=None,
+            fallback_bookmark_path=None,
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def test_feedback_sync_reads_changed_pages_and_updates_indexes(self):
+        from tools.linuxdo_knowledge.feedback import sync_feedback
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            page = config.obsidian_vault_path / "catalog" / "resources" / "Tool.md"
+            page.parent.mkdir(parents=True)
+            page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: deprioritized\n---\n"
+                "# Tool\n\n## Agent 摘要\n旧\n\n## 我的反馈\n不想继续看这个方向\n",
+                encoding="utf-8",
+            )
+            claim_page = config.obsidian_vault_path / "wiki" / "drafts" / "Claim.md"
+            claim_page.parent.mkdir(parents=True)
+            claim_page.write_text(
+                "---\nid: \"claim:context-budget\"\ntype: claim\nstatus: disputed\n---\n"
+                "# Claim\n\n## 我的反馈\n这个结论需要重新验证\n",
+                encoding="utf-8",
+            )
+
+            result = sync_feedback(config, synced_at="2026-06-01T12:00:00+00:00")
+            indexes = load_hot_indexes(config)
+
+        self.assertEqual(result["changed_files"], 2)
+        feedback_items = {item["id"]: item for item in indexes["user_feedback"]["items"]}
+        self.assertEqual(feedback_items["resource:tool"]["feedback"], "不想继续看这个方向")
+        self.assertEqual(feedback_items["claim:context-budget"]["feedback"], "这个结论需要重新验证")
+        self.assertEqual(indexes["resource_index"]["resources"]["resource:tool"]["status"], "deprioritized")
+        self.assertEqual(indexes["claim_index"]["claims"]["claim:context-budget"]["status"], "disputed")
+        self.assertEqual(indexes["feedback_sync_state"]["last_sync_at"], "2026-06-01T12:00:00+00:00")
+
+    def test_feedback_sync_skips_unchanged_files_and_updates_existing_feedback_item(self):
+        from tools.linuxdo_knowledge.feedback import sync_feedback
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            page = config.obsidian_vault_path / "catalog" / "resources" / "Tool.md"
+            page.parent.mkdir(parents=True)
+            page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: active\n---\n"
+                "# Tool\n\n## 我的反馈\n第一次反馈\n",
+                encoding="utf-8",
+            )
+
+            first = sync_feedback(config, synced_at="2026-06-01T12:00:00+00:00")
+            second = sync_feedback(config, synced_at="2026-06-01T13:00:00+00:00")
+            page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: deprioritized\n---\n"
+                "# Tool\n\n## 我的反馈\n第二次反馈\n",
+                encoding="utf-8",
+            )
+            third = sync_feedback(config, synced_at="2026-06-01T14:00:00+00:00")
+            indexes = load_hot_indexes(config)
+
+        self.assertEqual(first["changed_files"], 1)
+        self.assertEqual(second["changed_files"], 0)
+        self.assertEqual(third["changed_files"], 1)
+        self.assertEqual(len(indexes["user_feedback"]["items"]), 1)
+        self.assertEqual(indexes["user_feedback"]["items"][0]["feedback"], "第二次反馈")
+
+    def test_feedback_sync_cli_writes_result_file(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "obsidian_vault_path": str(config.obsidian_vault_path),
+                        "state_root": str(config.state_root),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            output_path = tmp_path / "feedback.json"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "feedback-sync",
+                    "--config",
+                    str(config_path),
+                    "--output",
+                    str(output_path),
+                ]
+            )
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result, {"changed_files": 0})
+
+    def test_feedback_sync_stops_feedback_at_next_same_level_heading(self):
+        from tools.linuxdo_knowledge.feedback import sync_feedback
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            page = config.obsidian_vault_path / "catalog" / "resources" / "Tool.md"
+            page.parent.mkdir(parents=True)
+            page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: active\n---\n"
+                "# Tool\n\n## 我的反馈\n只同步这一段\n\n## 后续计划\n这里不是反馈\n",
+                encoding="utf-8",
+            )
+
+            sync_feedback(config, synced_at="2026-06-01T12:00:00+00:00")
+            indexes = load_hot_indexes(config)
+
+        self.assertEqual(indexes["user_feedback"]["items"][0]["feedback"], "只同步这一段")
+
+    def test_feedback_sync_recovers_corrupt_feedback_hot_indexes(self):
+        from tools.linuxdo_knowledge.feedback import sync_feedback
+        from tools.linuxdo_knowledge.state import load_hot_indexes
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            config.state_root.mkdir(parents=True)
+            for name in ("feedback_sync_state", "user_feedback", "resource_index", "claim_index"):
+                (config.state_root / f"{name}.json").write_text("{not valid json", encoding="utf-8")
+            page = config.obsidian_vault_path / "catalog" / "resources" / "Tool.md"
+            page.parent.mkdir(parents=True)
+            page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: active\n---\n# Tool\n\n## 我的反馈\n恢复同步\n",
+                encoding="utf-8",
+            )
+
+            result = sync_feedback(config, synced_at="2026-06-01T12:00:00+00:00")
+            indexes = load_hot_indexes(config)
+
+        self.assertEqual(result, {"changed_files": 1})
+        self.assertEqual(indexes["user_feedback"]["items"][0]["feedback"], "恢复同步")
+        self.assertEqual(indexes["resource_index"]["resources"]["resource:tool"]["status"], "active")
+
+
+class StateMaintenanceTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=None,
+            fallback_bookmark_path=None,
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def test_maintenance_deprioritizes_repeated_low_value_topics_without_loading_legacy_history(self):
+        from tools.linuxdo_knowledge.state import ensure_knowledge_state, load_hot_indexes, maintain_state, save_hot_index
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            ensure_knowledge_state(config)
+            (config.state_root / "readings_all.json").write_text("{not valid json", encoding="utf-8")
+            save_hot_index(
+                config,
+                "topic_index",
+                {
+                    "topics": {
+                        "1": {
+                            "topic_id": 1,
+                            "title": "低价值列表",
+                            "url": "https://linux.do/t/topic/1",
+                            "status": "active",
+                            "skip_count": 3,
+                            "skip_reason": "纯列表收集，没有实测",
+                        },
+                        "2": {
+                            "topic_id": 2,
+                            "title": "还不该归档",
+                            "status": "active",
+                            "skip_count": 2,
+                            "skip_reason": "证据不足",
+                        },
+                    }
+                },
+            )
+
+            result = maintain_state(config, maintained_at="2026-06-01T12:00:00+00:00")
+            indexes = load_hot_indexes(config)
+            archive_log = config.state_root / "archive" / "maintenance-2026-06-01.jsonl"
+            archive_page = config.obsidian_vault_path / "catalog" / "archive" / "低价值列表.md"
+            archive_log_exists = archive_log.exists()
+            archive_page_exists = archive_page.exists()
+            archive_text = archive_page.read_text(encoding="utf-8") if archive_page.exists() else ""
+
+        self.assertEqual(result["deprioritized_topics"], 1)
+        self.assertEqual(indexes["topic_index"]["topics"]["1"]["status"], "deprioritized")
+        self.assertEqual(indexes["topic_index"]["topics"]["2"]["status"], "active")
+        self.assertTrue(archive_log_exists)
+        self.assertTrue(archive_page_exists)
+        self.assertIn("纯列表收集，没有实测", archive_text)
+        self.assertIn("https://linux.do/t/topic/1", archive_text)
+
+    def test_knowledge_maintain_cli_writes_result_file(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "obsidian_vault_path": str(config.obsidian_vault_path),
+                        "state_root": str(config.state_root),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            output_path = tmp_path / "maintain.json"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "knowledge-maintain",
+                    "--config",
+                    str(config_path),
+                    "--output",
+                    str(output_path),
+                ]
+            )
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result, {"deprioritized_topics": 0})

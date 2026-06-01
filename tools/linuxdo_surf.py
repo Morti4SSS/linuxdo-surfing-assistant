@@ -3,9 +3,20 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools.linuxdo_knowledge.config import load_config
+from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
+from tools.linuxdo_knowledge.feedback import sync_feedback
+from tools.linuxdo_knowledge.session import ingest_session
+from tools.linuxdo_knowledge.state import ensure_knowledge_state, maintain_state
+from tools.linuxdo_knowledge.strategy import build_knowledge_task
 
 
 MODES = {"research", "goldmine", "skill-feedback", "discover"}
@@ -340,6 +351,52 @@ def run_result(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_knowledge_init(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    ensure_knowledge_state(config)
+    return 0
+
+
+def run_bookmark_sync(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    ensure_knowledge_state(config)
+    result = sync_bookmarks(config)
+    write_json(args.output, result)
+    return 0
+
+
+def run_knowledge_plan(args: argparse.Namespace) -> int:
+    _validate_positive("batch-size", args.batch_size)
+    config = load_config(args.config)
+    ensure_knowledge_state(config)
+    task = build_knowledge_task(config, batch_size=args.batch_size)
+    write_json(args.output, task)
+    return 0
+
+
+def run_knowledge_session(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    task = json.loads(args.task.read_text(encoding="utf-8"))
+    readings = json.loads(args.readings.read_text(encoding="utf-8"))
+    result = ingest_session(config, task=task, readings=readings, batch_id=args.batch_id)
+    write_json(args.output, result)
+    return 0
+
+
+def run_feedback_sync(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    result = sync_feedback(config)
+    write_json(args.output, result)
+    return 0
+
+
+def run_knowledge_maintain(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    result = maintain_state(config)
+    write_json(args.output, result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Linux.do 任务型冲浪工具。")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -369,6 +426,39 @@ def build_parser() -> argparse.ArgumentParser:
     result.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
     result.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
     result.set_defaults(func=run_result)
+
+    knowledge_init = subparsers.add_parser("knowledge-init", help="初始化 Linux.do 知识库状态文件。")
+    knowledge_init.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    knowledge_init.set_defaults(func=run_knowledge_init)
+
+    bookmark_sync = subparsers.add_parser("bookmark-sync", help="同步 LinuxDo Scripts 书签到 frontier 队列。")
+    bookmark_sync.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    bookmark_sync.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/bookmark_sync_result.json"))
+    bookmark_sync.set_defaults(func=run_bookmark_sync)
+
+    knowledge_plan = subparsers.add_parser("knowledge-plan", help="从轻量 frontier 生成知识库阅读任务。")
+    knowledge_plan.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    knowledge_plan.add_argument("--batch-size", type=int, default=20)
+    knowledge_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/knowledge_task_latest.json"))
+    knowledge_plan.set_defaults(func=run_knowledge_plan)
+
+    knowledge_session = subparsers.add_parser("knowledge-session", help="写入一批冲浪结果到机器状态和 Obsidian。")
+    knowledge_session.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    knowledge_session.add_argument("--task", type=Path, required=True)
+    knowledge_session.add_argument("--readings", type=Path, required=True)
+    knowledge_session.add_argument("--batch-id", default="001")
+    knowledge_session.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/knowledge_session_result.json"))
+    knowledge_session.set_defaults(func=run_knowledge_session)
+
+    feedback_sync = subparsers.add_parser("feedback-sync", help="同步 Obsidian 人工反馈到机器状态。")
+    feedback_sync.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    feedback_sync.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/feedback_sync_result.json"))
+    feedback_sync.set_defaults(func=run_feedback_sync)
+
+    knowledge_maintain = subparsers.add_parser("knowledge-maintain", help="轻量维护热索引和冷归档。")
+    knowledge_maintain.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
+    knowledge_maintain.add_argument("--output", type=Path, default=Path("output/linuxdo_surf/knowledge_maintain_result.json"))
+    knowledge_maintain.set_defaults(func=run_knowledge_maintain)
 
     return parser
 

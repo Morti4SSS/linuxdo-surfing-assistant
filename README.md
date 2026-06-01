@@ -26,6 +26,12 @@ Linux.do Surfing Assistant 是一个面向 Codex 的 Linux.do AI 冲浪助手，
 - 根据标题、标签、正文、热度和已读状态给候选 topic 排序。
 - 维护轻量已读状态，避免重复生成同一批阅读任务。
 - 把阅读结果整理成模式结果或 skill evidence package。
+- 初始化 Linux.do 知识库机器状态和 Obsidian vault 结构。
+- 从 LinuxDo Scripts 收藏 JSON 同步高信号入口到 frontier。
+- 从轻量热索引生成 Level 0-3 的知识库阅读任务。
+- 将每批结构化阅读结果写入机器状态、证据分片和 Obsidian 页面。
+- 同步 Obsidian `## 我的反馈` 到机器状态，用于后续任务调整。
+- 维护低价值或重复 topic，将多次跳过的内容降权归档。
 
 示例：
 
@@ -40,11 +46,53 @@ python3 tools/linuxdo_surf.py plan \
 
 当前 CLI 只是状态和任务包辅助工具。真实读帖仍依赖 Codex 内置浏览器、用户 Chrome 登录态，或后续的浏览器控制流程。
 
-## 正在开发的功能
+## 第一版知识库流程
 
-正在开发的是第一版 “Linux.do 冲浪到 Obsidian 知识库” 系统。
+1. 准备配置：
 
-核心方向：
+```bash
+cp config/knowledge_sources.example.json config/knowledge_sources.json
+```
+
+把 `obsidian_vault_path` 和 `linuxdo_scripts_bookmarks.path` 改成本机路径。配置文件不能保存 WebDAV 密码、token 或账号凭证。
+
+2. 初始化机器状态和 vault 结构：
+
+```bash
+python3 tools/linuxdo_surf.py knowledge-init --config config/knowledge_sources.json
+```
+
+3. 每次冲浪 goal 启动前同步 Obsidian 人工反馈：
+
+```bash
+python3 tools/linuxdo_surf.py feedback-sync --config config/knowledge_sources.json
+```
+
+4. 同步 LinuxDo Scripts 收藏入口：
+
+```bash
+python3 tools/linuxdo_surf.py bookmark-sync --config config/knowledge_sources.json
+```
+
+5. 生成一批 20 帖阅读任务：
+
+```bash
+python3 tools/linuxdo_surf.py knowledge-plan --config config/knowledge_sources.json --batch-size 20
+```
+
+6. Codex 读完后，把结构化阅读结果写入状态和 Obsidian：
+
+```bash
+python3 tools/linuxdo_surf.py knowledge-session --config config/knowledge_sources.json --task output/linuxdo_surf/knowledge_task_latest.json --readings output/linuxdo_surf/knowledge_readings.json --batch-id 001
+```
+
+7. 每 5-10 批或用户要求时做轻量维护：
+
+```bash
+python3 tools/linuxdo_surf.py knowledge-maintain --config config/knowledge_sources.json
+```
+
+## 状态原则
 
 - 把机器持久化状态和 Obsidian 知识库分开。
 - 用轻量热索引减少重复阅读和 token 浪费。
@@ -64,42 +112,15 @@ python3 tools/linuxdo_surf.py plan \
   - 创建或更新资源卡、候选资源、对比页、工作流页和 wiki draft。
 - 保护 Obsidian 中的 `## 我的反馈`，让人的阅读、修改和偏好反哺后续冲浪。
 
-计划新增命令：
-
-```bash
-python3 tools/linuxdo_surf.py knowledge-init --config config/knowledge_sources.json
-python3 tools/linuxdo_surf.py feedback-sync --config config/knowledge_sources.json
-python3 tools/linuxdo_surf.py bookmark-sync --config config/knowledge_sources.json
-python3 tools/linuxdo_surf.py knowledge-plan --config config/knowledge_sources.json --batch-size 20
-python3 tools/linuxdo_surf.py knowledge-session --config config/knowledge_sources.json --task output/linuxdo_surf/knowledge_task_latest.json --readings output/linuxdo_surf/knowledge_readings.json
-python3 tools/linuxdo_surf.py knowledge-maintain --config config/knowledge_sources.json
-```
-
 ## 设计文档和计划
 
 - 早期 CLI 设计：[Linux.do 冲浪工具设计](docs/linuxdo-surfing-tool-design.md)
-- Obsidian 知识库 spec 目前维护在开发分支：[Linux.do 冲浪到 Obsidian 知识库设计](https://github.com/Morti4SSS/linuxdo-surfing-assistant/blob/codex/obsidian-knowledge-vault-spec/docs/superpowers/specs/2026-06-01-linuxdo-obsidian-knowledge-vault-design.md)
-- Obsidian 知识库 implementation plan 目前维护在开发分支：[Linux.do Obsidian Knowledge Vault Implementation Plan](https://github.com/Morti4SSS/linuxdo-surfing-assistant/blob/codex/obsidian-knowledge-vault-spec/docs/superpowers/plans/2026-06-01-linuxdo-obsidian-knowledge-vault.md)
+- Obsidian 知识库设计：[Linux.do 冲浪到 Obsidian 知识库设计](docs/superpowers/specs/2026-06-01-linuxdo-obsidian-knowledge-vault-design.md)
+- Obsidian 知识库实现计划：[Linux.do Obsidian Knowledge Vault Implementation Plan](docs/superpowers/plans/2026-06-01-linuxdo-obsidian-knowledge-vault.md)
 
 ## 开发状态
 
-默认分支 `main` 保存当前可用的轻量 CLI、测试和仓库说明。
-
-知识库设计分支：
-
-```text
-codex/obsidian-knowledge-vault-spec
-```
-
-这个分支主要保存 spec、implementation plan 和仓库说明。
-
-实际代码实现正在隔离 worktree / 实现分支中推进：
-
-```text
-codex/obsidian-knowledge-vault-impl
-```
-
-实现完成并通过测试、review 后，再合并回主开发分支。
+默认分支 `main` 保存当前可用的轻量 CLI、知识库流程、测试和仓库说明。
 
 ## 第一版不做什么
 
@@ -115,13 +136,7 @@ codex/obsidian-knowledge-vault-impl
 
 ## 测试
 
-当前已有测试：
-
-```bash
-python3 -m unittest tests/test_linuxdo_surf.py -q
-```
-
-知识库实现完成后，会新增：
+当前测试：
 
 ```bash
 python3 -m unittest tests/test_linuxdo_surf.py tests/test_linuxdo_knowledge.py -q
