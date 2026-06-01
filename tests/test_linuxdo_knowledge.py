@@ -521,6 +521,162 @@ class BookmarkSyncTests(unittest.TestCase):
         self.assertEqual(frontier["items"][0]["url"], "https://linux.do/t/topic/2273499")
 
 
+class ObsidianVaultTests(unittest.TestCase):
+    def knowledge_config(self, tmp_path):
+        from tools.linuxdo_knowledge.config import KnowledgeConfig
+
+        return KnowledgeConfig(
+            project_root=tmp_path,
+            state_root=tmp_path / "state" / "knowledge",
+            obsidian_vault_path=tmp_path / "vault",
+            bookmark_path=None,
+            fallback_bookmark_path=None,
+            chrome_context_enabled=True,
+            github_verification_enabled=True,
+        )
+
+    def test_scaffold_vault_creates_directories_and_missing_docs(self):
+        from tools.linuxdo_knowledge.obsidian import scaffold_vault
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            existing_agents = config.obsidian_vault_path / "AGENTS.md"
+            existing_agents.parent.mkdir(parents=True)
+            existing_agents.write_text("custom agent rules\n", encoding="utf-8")
+
+            scaffold_vault(config)
+
+            expected_dirs = [
+                "wiki/concepts",
+                "wiki/practices",
+                "wiki/drafts",
+                "wiki/notes",
+                "catalog/resources",
+                "catalog/candidates",
+                "catalog/comparisons",
+                "catalog/workflows",
+                "catalog/categories",
+                "catalog/archive",
+                "inbox/sessions",
+                "raw",
+            ]
+            for relative_path in expected_dirs:
+                with self.subTest(relative_path=relative_path):
+                    self.assertTrue((config.obsidian_vault_path / relative_path).is_dir())
+
+            self.assertTrue((config.obsidian_vault_path / "CLAUDE.md").is_file())
+            self.assertTrue((config.obsidian_vault_path / "index.md").is_file())
+            self.assertTrue((config.obsidian_vault_path / "log.md").is_file())
+            self.assertEqual(existing_agents.read_text(encoding="utf-8"), "custom agent rules\n")
+
+            claude_text = (config.obsidian_vault_path / "CLAUDE.md").read_text(encoding="utf-8")
+
+        self.assertIn("knowledge rules", claude_text)
+        self.assertIn("## 我的反馈", claude_text)
+        self.assertIn("Preserve", claude_text)
+
+    def test_scaffold_vault_agents_mentions_knowledge_rules_and_feedback(self):
+        from tools.linuxdo_knowledge.obsidian import scaffold_vault
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+
+            scaffold_vault(config)
+
+            agents_text = (config.obsidian_vault_path / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("knowledge rules", agents_text)
+        self.assertIn("## 我的反馈", agents_text)
+        self.assertIn("Preserve", agents_text)
+
+    def test_write_page_writes_frontmatter_title_sections_and_feedback_heading(self):
+        from tools.linuxdo_knowledge.obsidian import FEEDBACK_HEADING, write_page
+
+        with TemporaryDirectoryPath() as tmp_path:
+            path = tmp_path / "vault" / "catalog" / "resources" / "demo.md"
+
+            write_page(
+                path,
+                {"title": "Demo", "draft": False, "tags": ["ai", "linux.do"], "score": 3},
+                "Demo",
+                [("摘要", "这是摘要。"), ("链接", "- https://linux.do/t/topic/1")],
+            )
+
+            text = path.read_text(encoding="utf-8")
+
+        self.assertTrue(text.startswith("---\n"))
+        self.assertIn("title: Demo\n", text)
+        self.assertIn("draft: false\n", text)
+        self.assertIn("tags:\n  - ai\n  - linux.do\n", text)
+        self.assertIn("score: 3\n", text)
+        self.assertIn("# Demo\n", text)
+        self.assertIn("## 摘要\n\n这是摘要。\n", text)
+        self.assertIn("## 链接\n\n- https://linux.do/t/topic/1\n", text)
+        self.assertIn(f"{FEEDBACK_HEADING}\n", text)
+
+    def test_write_page_preserves_existing_feedback_when_rewriting_agent_sections(self):
+        from tools.linuxdo_knowledge.obsidian import FEEDBACK_HEADING, write_page
+
+        with TemporaryDirectoryPath() as tmp_path:
+            path = tmp_path / "vault" / "wiki" / "notes" / "demo.md"
+            write_page(path, {"title": "Old"}, "Old", [("旧摘要", "旧内容")])
+            user_feedback = "\n用户第一行\n- 保留这个列表\n\n"
+            path.write_text(path.read_text(encoding="utf-8") + user_feedback, encoding="utf-8")
+
+            write_page(path, {"title": "New"}, "New", [("新摘要", "新内容")])
+
+            text = path.read_text(encoding="utf-8")
+            preserved_feedback = text.split(FEEDBACK_HEADING, 1)[1]
+
+        self.assertIn("# New\n", text)
+        self.assertIn("## 新摘要\n\n新内容\n", text)
+        self.assertNotIn("旧摘要", text)
+        self.assertEqual(preserved_feedback, user_feedback)
+
+    def test_page_path_for_maps_types_and_safe_filename_removes_invalid_characters(self):
+        from tools.linuxdo_knowledge.obsidian import page_path_for, safe_filename
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+
+            cases = {
+                "resource": "catalog/resources",
+                "candidate": "catalog/candidates",
+                "comparison": "catalog/comparisons",
+                "workflow": "catalog/workflows",
+                "category": "catalog/categories",
+                "archive": "catalog/archive",
+                "concept": "wiki/concepts",
+                "practice": "wiki/practices",
+                "draft": "wiki/drafts",
+                "note": "wiki/notes",
+                "session": "inbox/sessions",
+            }
+            for page_type, directory in cases.items():
+                with self.subTest(page_type=page_type):
+                    path = page_path_for(config, page_type, " Bad / Name:* ?<>|  ")
+                    self.assertEqual(path, config.obsidian_vault_path / directory / "Bad-Name.md")
+
+        self.assertEqual(safe_filename(" a\t b \n c "), "a-b-c")
+        self.assertEqual(safe_filename(":/\\*?\"<>|"), "untitled")
+
+    def test_append_log_appends_without_destroying_existing_log(self):
+        from tools.linuxdo_knowledge.obsidian import append_log
+
+        with TemporaryDirectoryPath() as tmp_path:
+            config = self.knowledge_config(tmp_path)
+            log_path = config.obsidian_vault_path / "log.md"
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text("first\n", encoding="utf-8")
+
+            append_log(config, "second")
+            append_log(config, "third")
+
+            text = log_path.read_text(encoding="utf-8")
+
+        self.assertEqual(text, "first\nsecond\nthird\n")
+
+
 class ReadingStrategyTests(unittest.TestCase):
     def knowledge_config(self, tmp_path):
         from tools.linuxdo_knowledge.config import KnowledgeConfig
