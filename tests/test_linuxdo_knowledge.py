@@ -290,6 +290,8 @@ class KnowledgeConfigAndStateTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue((tmp_path / "state" / "knowledge" / "topic_index.json").exists())
             self.assertTrue((tmp_path / "state" / "knowledge" / "session_log.jsonl").exists())
+            self.assertTrue((tmp_path / "vault" / "index.md").exists())
+            self.assertTrue((tmp_path / "vault" / "inbox" / "sessions").is_dir())
 
     def test_script_knowledge_init_uses_config_and_creates_state(self):
         with TemporaryDirectoryPath() as tmp_path:
@@ -316,6 +318,7 @@ class KnowledgeConfigAndStateTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((tmp_path / "state" / "knowledge" / "topic_index.json").exists())
+            self.assertTrue((tmp_path / "vault" / "index.md").exists())
 
 
 class BookmarkSyncTests(unittest.TestCase):

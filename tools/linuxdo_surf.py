@@ -14,6 +14,7 @@ if __package__ in {None, ""}:
 from tools.linuxdo_knowledge.config import load_config
 from tools.linuxdo_knowledge.bookmarks import sync_bookmarks
 from tools.linuxdo_knowledge.feedback import sync_feedback
+from tools.linuxdo_knowledge.obsidian import scaffold_vault
 from tools.linuxdo_knowledge.session import ingest_session
 from tools.linuxdo_knowledge.state import ensure_knowledge_state, maintain_state
 from tools.linuxdo_knowledge.strategy import build_knowledge_task
@@ -353,6 +354,7 @@ def run_result(args: argparse.Namespace) -> int:
 
 def run_knowledge_init(args: argparse.Namespace) -> int:
     config = load_config(args.config)
+    scaffold_vault(config)
     ensure_knowledge_state(config)
     return 0
 
