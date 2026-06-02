@@ -59,7 +59,16 @@ class LinuxdoSurfTests(unittest.TestCase):
         with TemporaryDirectoryPath() as tmp_path:
             state = linuxdo_surf.load_state(tmp_path / "missing.json")
 
-        self.assertEqual(state, {"read_topic_ids": [], "synced_skill_names": []})
+        self.assertEqual(
+            state,
+            {
+                "read_topic_ids": [],
+                "synced_skill_names": [],
+                "reviewed_github_repos": [],
+                "reviewed_github_searches": [],
+                "render_checked_topic_ids": [],
+            },
+        )
 
     def test_save_state_normalizes_topic_ids_and_skill_names(self):
         with TemporaryDirectoryPath() as tmp_path:
@@ -250,6 +259,109 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(task["candidates"][0]["id"], 2)
         self.assertTrue(state_exists)
 
+    def test_cli_help_includes_skill_referenced_legacy_and_knowledge_commands(self):
+        parser = linuxdo_surf.build_parser()
+
+        help_text = parser.format_help()
+
+        for command in [
+            "goal-plan",
+            "session",
+            "github-plan",
+            "github-result",
+            "backfill-plan",
+            "visual-review-plan",
+            "knowledge-init",
+            "knowledge-plan",
+            "knowledge-session",
+        ]:
+            with self.subTest(command=command):
+                self.assertIn(command, help_text)
+
+    def test_cli_legacy_compat_commands_write_task_artifacts(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            out_dir = tmp_path / "out"
+            state_path = tmp_path / "state.json"
+
+            github_exit = linuxdo_surf.main(
+                [
+                    "github-plan",
+                    "--mode",
+                    "discover",
+                    "--strategy",
+                    "github-only",
+                    "--query",
+                    "codex workflow skill",
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(state_path),
+                ]
+            )
+            github_task = json.loads((out_dir / "github_task_discover.json").read_text(encoding="utf-8"))
+
+            readings_path = tmp_path / "readings.json"
+            readings_path.write_text(
+                json.dumps(
+                    {
+                        "readings": [
+                            {
+                                "id": 7,
+                                "title": "WebUI 截图教程",
+                                "url": "https://linux.do/t/topic/7",
+                                "summary": "需要看截图确认 UI 状态。",
+                                "render_required": True,
+                                "visual_review_status": "needed",
+                            },
+                            {
+                                "id": 8,
+                                "title": "已核验",
+                                "url": "https://linux.do/t/topic/8",
+                                "summary": "已检查。",
+                                "render_required": True,
+                                "visual_review_status": "checked",
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            visual_exit = linuxdo_surf.main(
+                [
+                    "visual-review-plan",
+                    "--input",
+                    str(readings_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(state_path),
+                    "--max-topics",
+                    "5",
+                ]
+            )
+            visual_task = json.loads((out_dir / "visual_review_task.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(github_exit, 0)
+        self.assertEqual(github_task["control_channel"], "github-mcp")
+        self.assertEqual(github_task["next_batch"]["searches"][0]["query"], "codex workflow skill")
+        self.assertEqual(visual_exit, 0)
+        self.assertEqual([item["id"] for item in visual_task["items"]], [7])
+
+    def test_scripts_entrypoint_delegates_to_tools_helper(self):
+        script_path = MODULE_PATH.parents[1] / "scripts" / "linuxdo_surf.py"
+
+        result = subprocess.run(
+            [sys.executable, str(script_path), "github-plan", "--help"],
+            cwd=MODULE_PATH.parents[1],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("github-plan", result.stdout)
+
     def test_cli_plan_writes_control_channel(self):
         with TemporaryDirectoryPath() as tmp_path:
             topics_path = tmp_path / "topics.json"
@@ -276,6 +388,33 @@ class LinuxdoSurfTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(task["control_channel"], "user-chrome")
+
+    def test_cli_plan_writes_research_strategy(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            topics_path = tmp_path / "topics.json"
+            topics_path.write_text(json.dumps({"topics": []}), encoding="utf-8")
+            out_dir = tmp_path / "out"
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "plan",
+                    "--mode",
+                    "research",
+                    "--strategy",
+                    "linuxdo-first",
+                    "--topics",
+                    str(topics_path),
+                    "--output",
+                    str(out_dir),
+                    "--state",
+                    str(tmp_path / "state.json"),
+                ]
+            )
+
+            task = json.loads((out_dir / "browser_task_research.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(task["research_strategy"], "linuxdo-first")
 
     def test_cli_plan_rejects_unknown_channel(self):
         with TemporaryDirectoryPath() as tmp_path:

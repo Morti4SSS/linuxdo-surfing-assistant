@@ -22,7 +22,17 @@ from tools.linuxdo_knowledge.strategy import build_knowledge_task
 
 MODES = {"research", "goldmine", "skill-feedback", "discover"}
 CONTROL_CHANNELS = {"codex-browser", "user-chrome", "mac-goal", "computer-use"}
+RESEARCH_STRATEGIES = {"linuxdo-only", "github-only", "linuxdo-first", "github-first"}
 DEFAULT_CONTROL_CHANNEL = "codex-browser"
+DEFAULT_RESEARCH_STRATEGY = "linuxdo-only"
+DISCOVERY_QUEUE_NAMES = (
+    "author-tracking",
+    "comment-reference",
+    "tool-lookup",
+    "skill-workflow-evidence",
+    "github-repo-research",
+    "github-search",
+)
 DEFAULT_KEYWORDS = {
     "goldmine": ["ai coding", "codex", "claude code", "skill", "mcp", "workflow", "工作流", "插件", "开源", "经验"],
     "discover": ["skill", "workflow", "harness", "mcp", "cli", "插件", "工具", "开源", "推荐"],
@@ -40,6 +50,13 @@ def validate_channel(channel: str) -> str:
     normalized = channel.strip().lower()
     if normalized not in CONTROL_CHANNELS:
         raise ValueError(f"未知操控通道：{channel}")
+    return normalized
+
+
+def validate_research_strategy(strategy: str) -> str:
+    normalized = strategy.strip().lower()
+    if normalized not in RESEARCH_STRATEGIES:
+        raise ValueError(f"未知研究策略：{strategy}")
     return normalized
 
 
@@ -118,12 +135,18 @@ def _unique(values: list[str]) -> list[str]:
     return result
 
 
-DEFAULT_STATE = {"read_topic_ids": [], "synced_skill_names": []}
+DEFAULT_STATE = {
+    "read_topic_ids": [],
+    "synced_skill_names": [],
+    "reviewed_github_repos": [],
+    "reviewed_github_searches": [],
+    "render_checked_topic_ids": [],
+}
 
 
 def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return dict(DEFAULT_STATE)
+        return {key: list(value) for key, value in DEFAULT_STATE.items()}
     data = json.loads(path.read_text(encoding="utf-8"))
     return _normalize_state(data)
 
@@ -142,17 +165,20 @@ def build_browser_task(
     max_topics: int,
     max_replies: int,
     control_channel: str = DEFAULT_CONTROL_CHANNEL,
+    research_strategy: str = DEFAULT_RESEARCH_STRATEGY,
 ) -> dict[str, Any]:
     mode = validate_mode(mode)
     control_channel = validate_channel(control_channel)
+    research_strategy = validate_research_strategy(research_strategy)
     return {
         "mode": mode,
         "control_channel": control_channel,
+        "research_strategy": research_strategy,
         "query": query,
         "skill_names": skill_names,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "budget": {"max_topics": max_topics, "max_replies_per_topic": max_replies},
-        "instructions": _browser_instructions(mode, control_channel),
+        "instructions": _browser_instructions(mode, control_channel, research_strategy),
         "candidates": [
             {
                 "id": _safe_int(item.get("id")) or 0,
@@ -168,18 +194,38 @@ def build_browser_task(
 def _normalize_state(state: dict[str, Any]) -> dict[str, Any]:
     read_ids = sorted({int(item) for item in state.get("read_topic_ids", []) if str(item).strip().isdigit()})
     synced_names = _unique([str(item).strip() for item in state.get("synced_skill_names", []) if str(item).strip()])
-    return {"read_topic_ids": read_ids, "synced_skill_names": synced_names}
+    reviewed_repos = _normalize_repo_list(state.get("reviewed_github_repos", []))
+    reviewed_searches = _unique(
+        [str(item).strip().lower() for item in state.get("reviewed_github_searches", []) if str(item).strip()]
+    )
+    render_checked_ids = sorted(
+        {int(item) for item in state.get("render_checked_topic_ids", []) if str(item).strip().isdigit()}
+    )
+    return {
+        "read_topic_ids": read_ids,
+        "synced_skill_names": synced_names,
+        "reviewed_github_repos": reviewed_repos,
+        "reviewed_github_searches": reviewed_searches,
+        "render_checked_topic_ids": render_checked_ids,
+    }
 
 
-def _browser_instructions(mode: str, control_channel: str) -> str:
+def _browser_instructions(mode: str, control_channel: str, research_strategy: str) -> str:
     channel_notes = {
         "codex-browser": "请使用 Codex 内置浏览器打开候选 Linux.do 帖子。首次需要登录时请让用户完成登录，后续复用已保存登录态。",
         "user-chrome": "请使用用户本机 Chrome 中已经打开或按标签组整理的 Linux.do 帖子，理解标签组和页面之间的关系；不要把这个通道当作全站搜索。",
         "mac-goal": "这是未来 Mac /goal 长任务通道。执行前必须明确停止标准、预算和阶段汇报，不要在第一版里假装已经能后台持续冲浪。",
         "computer-use": "这是实验性 computer-use 通道。仅在普通浏览器能力不足时考虑，不用于常规帖子阅读。",
     }
+    strategy_notes = {
+        "linuxdo-only": "研究策略：只使用 Linux.do，不自动进入 GitHub；如发现项目线索，只记录为可补深挖候选。",
+        "linuxdo-first": "研究策略：Linux.do 为主；只把值得验证的项目、skill、插件、工具、workflow、repo 交给 GitHub 深挖。",
+        "github-first": "研究策略：GitHub 为主；搜索 Linux.do 来补社区反馈，不做全站泛搜。",
+        "github-only": "研究策略：该策略通常不生成 Linux.do 阅读任务；如出现此任务，只记录需要人工确认的社区反馈缺口。",
+    }
     return (
         channel_notes[control_channel]
+        + strategy_notes[research_strategy]
         + "读取首帖和高价值回复，区分事实、观点、争议和行动建议。"
         + f"当前模式：{mode}。不要生成固定日报，只输出本轮任务结果。"
     )
@@ -288,7 +334,7 @@ def load_readings(path: Path) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        readings = data.get("readings") or data.get("topics") or []
+        readings = data.get("readings") or data.get("topics") or data.get("github_readings") or data.get("items") or []
         return readings if isinstance(readings, list) else []
     return []
 
@@ -322,6 +368,7 @@ def run_plan(args: argparse.Namespace) -> int:
         args.max_topics,
         args.max_replies,
         args.channel,
+        args.strategy,
     )
     write_json(args.output / f"browser_task_{args.mode}.json", task)
     save_state(args.state, state)
@@ -348,6 +395,151 @@ def run_result(args: argparse.Namespace) -> int:
     write_json(args.output / f"mode_result_{mode}.json", result)
     state = load_state(args.state)
     state["read_topic_ids"] = state["read_topic_ids"] + result["read_topic_ids"]
+    state["render_checked_topic_ids"] = state["render_checked_topic_ids"] + _render_checked_ids(result["items"])
+    save_state(args.state, state)
+    return 0
+
+
+def run_goal_plan(args: argparse.Namespace) -> int:
+    _validate_positive("max-topics", args.max_topics)
+    _validate_positive("max-replies", args.max_replies)
+    _validate_positive("max-candidates", args.max_candidates)
+    state = load_state(args.state)
+    topics = load_topics(args.topics)
+    skill_names = _split_cli_values(args.skills)
+    if args.mode == "skill-feedback" and not skill_names:
+        raise SystemExit(2)
+    candidates = rank_topics(
+        topics,
+        mode=args.mode,
+        query=args.query,
+        skill_names=skill_names,
+        read_ids=set(state["read_topic_ids"]),
+        limit=args.max_candidates,
+    )
+    next_batch = candidates[: args.max_topics]
+    task = build_browser_task(
+        args.mode,
+        args.query,
+        next_batch,
+        skill_names,
+        args.max_topics,
+        args.max_replies,
+        "mac-goal",
+        args.strategy,
+    )
+    task["frontier_queue"] = str(args.queue)
+    task["state"] = str(args.state)
+    task["next_batch"] = task.pop("candidates")
+    task["stop_conditions"] = ["next_batch 为空", "达到本轮深读预算", "连续批次没有发现高价值候选"]
+    write_json(args.queue, {"items": candidates, "created_at": datetime.now().isoformat(timespec="seconds")})
+    write_json(args.output / f"goal_task_{args.mode}.json", task)
+    save_state(args.state, state)
+    return 0
+
+
+def run_session(args: argparse.Namespace) -> int:
+    task = json.loads(args.task.read_text(encoding="utf-8"))
+    readings = _filter_readings_to_task(load_readings(args.readings), task)
+    result = build_mode_result(task, readings)
+    mode = validate_mode(result["mode"])
+    session = {
+        **result,
+        "stop_reason": args.stop_reason,
+        "discovery_queues": _empty_discovery_queues(),
+    }
+    write_json(_next_session_path(args.output, mode), session)
+    state = load_state(args.state)
+    state["read_topic_ids"] = state["read_topic_ids"] + session["read_topic_ids"]
+    state["render_checked_topic_ids"] = state["render_checked_topic_ids"] + _render_checked_ids(session["items"])
+    save_state(args.state, state)
+    return 0
+
+
+def run_github_plan(args: argparse.Namespace) -> int:
+    _validate_positive("max-repos", args.max_repos)
+    _validate_positive("max-searches", args.max_searches)
+    state = load_state(args.state)
+    frontier = load_frontier(args.queue)
+    repositories = _select_github_repos(frontier, state, args.max_repos)
+    searches = _select_github_searches(frontier, state, args.max_searches)
+    if args.strategy == "github-only" and args.query.strip():
+        searches = [
+            {
+                "query": args.query.strip(),
+                "source_tool": args.query.strip(),
+                "source_topic_ids": [],
+                "source_urls": [],
+                "score": 1,
+                "depth": 1,
+            }
+        ]
+    task = build_github_task(
+        args.mode,
+        args.query,
+        args.queue,
+        repositories,
+        searches,
+        args.max_repos,
+        args.max_searches,
+        args.strategy,
+    )
+    write_json(args.output / f"github_task_{args.mode}.json", task)
+    save_state(args.state, state)
+    return 0
+
+
+def run_github_result(args: argparse.Namespace) -> int:
+    task = json.loads(args.task.read_text(encoding="utf-8"))
+    readings = load_readings(args.readings)
+    result = build_github_result(task, readings)
+    mode = validate_mode(str(result["mode"]))
+    write_json(args.output / f"github_result_{mode}.json", result)
+    state = load_state(args.state)
+    state["reviewed_github_repos"] = state["reviewed_github_repos"] + result["reviewed_github_repos"]
+    state["reviewed_github_searches"] = state["reviewed_github_searches"] + result["reviewed_github_searches"]
+    save_state(args.state, state)
+    return 0
+
+
+def run_backfill_plan(args: argparse.Namespace) -> int:
+    source_platform = str(args.source_platform).strip().lower()
+    readings = load_readings(args.input)
+    if source_platform == "linuxdo":
+        _validate_positive("max-repos", args.max_repos)
+        _validate_positive("max-searches", args.max_searches)
+        repositories = _repos_from_readings(readings)[: args.max_repos]
+        searches = _searches_from_readings(readings)[: args.max_searches]
+        task = build_github_task(
+            args.mode,
+            "",
+            args.queue,
+            repositories,
+            searches,
+            args.max_repos,
+            args.max_searches,
+            "linuxdo-first",
+        )
+        task["backfill_source"] = "linuxdo"
+        write_json(args.output / f"github_task_{args.mode}.json", task)
+        return 0
+    if source_platform == "github":
+        _validate_positive("max-topics", args.max_topics)
+        query = _linuxdo_query_from_github_readings(readings)
+        topics = load_topics(args.topics)
+        candidates = rank_topics(topics, mode=args.mode, query=query, limit=args.max_topics) if query else []
+        task = build_browser_task(args.mode, query, candidates, [], args.max_topics, 8, research_strategy="github-first")
+        task["backfill_source"] = "github"
+        write_json(args.output / f"browser_task_{args.mode}.json", task)
+        return 0
+    raise SystemExit(2)
+
+
+def run_visual_review_plan(args: argparse.Namespace) -> int:
+    readings = load_readings(args.input)
+    state = load_state(args.state)
+    task = build_visual_review_task(readings, state, args.max_topics)
+    write_json(args.output / "visual_review_task.json", task)
     save_state(args.state, state)
     return 0
 
@@ -406,6 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan", help="生成 Codex 内置浏览器阅读任务包。")
     plan.add_argument("--mode", required=True, choices=sorted(MODES))
     plan.add_argument("--channel", choices=sorted(CONTROL_CHANNELS), default=DEFAULT_CONTROL_CHANNEL)
+    plan.add_argument("--strategy", choices=sorted(RESEARCH_STRATEGIES), default=DEFAULT_RESEARCH_STRATEGY)
     plan.add_argument("--query", default="")
     plan.add_argument("--skills", nargs="*", default=[])
     plan.add_argument("--topics", type=Path, default=Path("output/linuxdo_skill_research/topic_details_top220.json"))
@@ -414,6 +607,20 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--max-topics", type=int, default=10)
     plan.add_argument("--max-replies", type=int, default=8)
     plan.set_defaults(func=run_plan)
+
+    goal_plan = subparsers.add_parser("goal-plan", help="生成 Mac /goal 持续冲浪任务包。")
+    goal_plan.add_argument("--mode", required=True, choices=sorted(MODES))
+    goal_plan.add_argument("--strategy", choices=sorted(RESEARCH_STRATEGIES), default=DEFAULT_RESEARCH_STRATEGY)
+    goal_plan.add_argument("--query", default="")
+    goal_plan.add_argument("--skills", nargs="*", default=[])
+    goal_plan.add_argument("--topics", type=Path, default=Path("output/linuxdo_skill_research/topic_details_top220.json"))
+    goal_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    goal_plan.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    goal_plan.add_argument("--queue", type=Path, default=Path("state/linuxdo_frontier_queue.json"))
+    goal_plan.add_argument("--max-candidates", type=int, default=80)
+    goal_plan.add_argument("--max-topics", type=int, default=12)
+    goal_plan.add_argument("--max-replies", type=int, default=8)
+    goal_plan.set_defaults(func=run_goal_plan)
 
     evidence = subparsers.add_parser("evidence", help="从阅读结果生成 skill 管理证据包。")
     evidence.add_argument("--skills", nargs="+", required=True)
@@ -428,6 +635,52 @@ def build_parser() -> argparse.ArgumentParser:
     result.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
     result.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
     result.set_defaults(func=run_result)
+
+    session = subparsers.add_parser("session", help="保存 /goal 长任务阅读会话，并更新已读状态。")
+    session.add_argument("--task", type=Path, required=True)
+    session.add_argument("--readings", type=Path, required=True)
+    session.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    session.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    session.add_argument("--stop-reason", required=True)
+    session.set_defaults(func=run_session)
+
+    github_plan = subparsers.add_parser("github-plan", help="从发现队列生成 GitHub 深挖任务包。")
+    github_plan.add_argument("--mode", required=True, choices=sorted(MODES))
+    github_plan.add_argument("--strategy", choices=sorted(RESEARCH_STRATEGIES), default="linuxdo-first")
+    github_plan.add_argument("--query", default="")
+    github_plan.add_argument("--queue", type=Path, default=Path("state/linuxdo_frontier_queue.json"))
+    github_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    github_plan.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    github_plan.add_argument("--max-repos", type=int, default=8)
+    github_plan.add_argument("--max-searches", type=int, default=5)
+    github_plan.set_defaults(func=run_github_plan)
+
+    github_result = subparsers.add_parser("github-result", help="保存 GitHub 深挖结果。")
+    github_result.add_argument("--task", type=Path, required=True)
+    github_result.add_argument("--readings", type=Path, required=True)
+    github_result.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    github_result.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    github_result.set_defaults(func=run_github_result)
+
+    backfill_plan = subparsers.add_parser("backfill-plan", help="从单平台结果生成另一平台补深挖任务包。")
+    backfill_plan.add_argument("--source-platform", required=True, choices=["linuxdo", "github"])
+    backfill_plan.add_argument("--mode", required=True, choices=sorted(MODES))
+    backfill_plan.add_argument("--input", type=Path, required=True)
+    backfill_plan.add_argument("--topics", type=Path, default=Path("output/linuxdo_skill_research/topic_details_top220.json"))
+    backfill_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    backfill_plan.add_argument("--queue", type=Path, default=Path("state/linuxdo_frontier_queue.json"))
+    backfill_plan.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    backfill_plan.add_argument("--max-repos", type=int, default=8)
+    backfill_plan.add_argument("--max-searches", type=int, default=5)
+    backfill_plan.add_argument("--max-topics", type=int, default=10)
+    backfill_plan.set_defaults(func=run_backfill_plan)
+
+    visual_review_plan = subparsers.add_parser("visual-review-plan", help="从阅读结果生成需要渲染页回看的任务包。")
+    visual_review_plan.add_argument("--input", type=Path, required=True)
+    visual_review_plan.add_argument("--output", type=Path, default=Path("output/linuxdo_surf"))
+    visual_review_plan.add_argument("--state", type=Path, default=Path("state/linuxdo_surf_state.json"))
+    visual_review_plan.add_argument("--max-topics", type=int, default=10)
+    visual_review_plan.set_defaults(func=run_visual_review_plan)
 
     knowledge_init = subparsers.add_parser("knowledge-init", help="初始化 Linux.do 知识库状态文件。")
     knowledge_init.add_argument("--config", type=Path, default=Path("config/knowledge_sources.json"))
@@ -470,6 +723,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args.mode = validate_mode(args.mode) if hasattr(args, "mode") else ""
     args.channel = validate_channel(args.channel) if hasattr(args, "channel") else ""
+    args.strategy = validate_research_strategy(args.strategy) if hasattr(args, "strategy") else ""
     return args.func(args)
 
 
@@ -529,6 +783,254 @@ def _safe_int(value: Any) -> int | None:
 def _validate_positive(name: str, value: int) -> None:
     if value <= 0:
         raise SystemExit(2)
+
+
+def load_frontier(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"discovery_queues": _empty_discovery_queues(), "items": []}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return {"discovery_queues": _empty_discovery_queues(), "items": []}
+    discovery = data.get("discovery_queues", {})
+    if not isinstance(discovery, dict):
+        discovery = {}
+    data["discovery_queues"] = {
+        name: value if isinstance(value := discovery.get(name, []), list) else []
+        for name in DISCOVERY_QUEUE_NAMES
+    }
+    return data
+
+
+def build_github_task(
+    mode: str,
+    query: str,
+    frontier_path: Path,
+    repositories: list[dict[str, Any]],
+    searches: list[dict[str, Any]],
+    max_repos: int,
+    max_searches: int,
+    research_strategy: str,
+) -> dict[str, Any]:
+    mode = validate_mode(mode)
+    research_strategy = validate_research_strategy(research_strategy)
+    return {
+        "mode": mode,
+        "control_channel": "github-mcp",
+        "research_strategy": research_strategy,
+        "query": query,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "frontier_queue": str(frontier_path),
+        "budget": {"max_repos": max_repos, "max_searches": max_searches},
+        "instructions": "请使用 GitHub MCP 或 GitHub 官方页面检查 README、最近提交、release、issues、安装成本、风险和替代方案。",
+        "next_batch": {
+            "repositories": repositories[:max_repos],
+            "searches": searches[:max_searches],
+        },
+    }
+
+
+def build_github_result(task: dict[str, Any], readings: list[dict[str, Any]]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for reading in readings:
+        repo = _normalize_repo_name(reading.get("repo") or reading.get("url"))
+        if not repo:
+            continue
+        items.append(
+            {
+                "repo": repo,
+                "url": str(reading.get("url") or f"https://github.com/{repo}"),
+                "source_query": str(reading.get("source_query", "")).strip(),
+                "summary": str(reading.get("summary", "")),
+                "recommendation": str(reading.get("recommendation", "")),
+                "confidence": str(reading.get("confidence", "")),
+                "related_repos": _field_as_list(reading.get("related_repos", [])),
+                "related_tools": _field_as_list(reading.get("related_tools", [])),
+            }
+        )
+    searches = [
+        str(item.get("query", "")).strip().lower()
+        for item in (task.get("next_batch", {}) or {}).get("searches", [])
+        if isinstance(item, dict) and str(item.get("query", "")).strip()
+    ]
+    return {
+        "mode": str(task.get("mode", "")),
+        "query": str(task.get("query", "")),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "reviewed_github_repos": [item["repo"] for item in items],
+        "reviewed_github_searches": _unique(searches),
+        "items": items,
+        "discovery_queues": _empty_discovery_queues(),
+    }
+
+
+def build_visual_review_task(readings: list[dict[str, Any]], state: dict[str, Any], max_topics: int) -> dict[str, Any]:
+    _validate_positive("max-topics", max_topics)
+    checked_ids = set(state.get("render_checked_topic_ids", []))
+    candidates: list[dict[str, Any]] = []
+    for reading in readings:
+        topic_id = _safe_int(reading.get("id")) or 0
+        if topic_id in checked_ids:
+            continue
+        if not _reading_needs_visual_review(reading):
+            continue
+        candidates.append(
+            {
+                "id": topic_id,
+                "title": str(reading.get("title", "")),
+                "url": str(reading.get("url", "")),
+                "summary": str(reading.get("summary", "")),
+                "render_required": True,
+                "visual_reason": str(reading.get("visual_reason") or "render_required"),
+                "visual_review_priority": str(reading.get("visual_review_priority") or "medium"),
+                "visual_assets": _field_as_list(reading.get("visual_assets", [])),
+            }
+        )
+    return {
+        "task_type": "visual-review",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "budget": {"max_topics": max_topics},
+        "instructions": "Use Codex browser to open rendered Linux.do pages and check screenshots, videos, UI/WebUI, tutorial steps, layout, and visual evidence.",
+        "items": candidates[:max_topics],
+    }
+
+
+def _reading_needs_visual_review(reading: dict[str, Any]) -> bool:
+    if bool(reading.get("render_checked", False)) or str(reading.get("visual_review_status", "")).lower() == "checked":
+        return False
+    if bool(reading.get("render_required", False)) or bool(reading.get("visual_evidence_needed", False)):
+        return True
+    text = " ".join(
+        str(reading.get(field, ""))
+        for field in ("title", "summary", "first_post", "visual_reason")
+    ).lower()
+    return any(word.lower() in text for word in ("截图", "图片", "视频", "ui", "webui", "教程", "安装", "配置", "如图"))
+
+
+def _render_checked_ids(items: list[dict[str, Any]]) -> list[int]:
+    ids = []
+    for item in items:
+        if item.get("render_checked") or str(item.get("visual_review_status", "")).lower() == "checked":
+            parsed = _safe_int(item.get("id"))
+            if parsed is not None:
+                ids.append(parsed)
+    return ids
+
+
+def _next_session_path(output: Path, mode: str) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    return output / f"session_{mode}_{stamp}.json"
+
+
+def _empty_discovery_queues() -> dict[str, list[dict[str, Any]]]:
+    return {name: [] for name in DISCOVERY_QUEUE_NAMES}
+
+
+def _select_github_repos(frontier: dict[str, Any], state: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    reviewed = set(state.get("reviewed_github_repos", []))
+    items = frontier.get("discovery_queues", {}).get("github-repo-research", [])
+    result = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        repo = _normalize_repo_name(item.get("repo") or item.get("url"))
+        if not repo or repo in reviewed:
+            continue
+        result.append({**item, "repo": repo, "url": f"https://github.com/{repo}"})
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _select_github_searches(frontier: dict[str, Any], state: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    reviewed = set(state.get("reviewed_github_searches", []))
+    items = frontier.get("discovery_queues", {}).get("github-search", [])
+    result = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        query = str(item.get("query", "")).strip()
+        if not query or query.lower() in reviewed:
+            continue
+        result.append({**item, "query": query})
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _repos_from_readings(readings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    repos: list[str] = []
+    for reading in readings:
+        repos.extend(_github_repos_from_values([reading.get("url", ""), reading.get("summary", ""), reading.get("github_repos", [])]))
+    return [{"repo": repo, "url": f"https://github.com/{repo}", "score": 1} for repo in _unique(repos)]
+
+
+def _searches_from_readings(readings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    queries = []
+    for reading in readings:
+        tools = reading.get("tools", [])
+        if isinstance(tools, str):
+            tools = [tools]
+        queries.extend(str(tool).strip() for tool in tools if str(tool).strip())
+    return [{"query": query, "source_tool": query, "score": 1} for query in _unique(queries)]
+
+
+def _linuxdo_query_from_github_readings(readings: list[dict[str, Any]]) -> str:
+    values: list[str] = []
+    for reading in readings:
+        values.append(str(reading.get("repo", "")))
+        values.append(str(reading.get("source_query", "")))
+        values.extend(str(item) for item in _field_as_list(reading.get("related_tools", [])))
+    return " ".join(_unique([value for value in values if value.strip()]))
+
+
+def _github_repos_from_values(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        values = [values]
+    repos: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            repos.extend(_github_repos_from_values(value))
+            continue
+        text = str(value)
+        for owner, repo in re.findall(r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", text):
+            repos.append(f"{owner}/{repo}")
+        without_urls = re.sub(r"https?://\S+", " ", text)
+        for candidate in re.findall(r"(?<![A-Za-z0-9_.-/])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?![A-Za-z0-9_.-/])", without_urls):
+            repos.append(candidate)
+    return _normalize_repo_list(repos)
+
+
+def _normalize_repo_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        values = [values]
+    repos = []
+    for value in values:
+        repo = _normalize_repo_name(value)
+        if repo:
+            repos.append(repo)
+    return _unique(repos)
+
+
+def _normalize_repo_name(value: Any) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", text)
+    if match:
+        text = f"{match.group(1)}/{match.group(2)}"
+    parts = text.strip("/").split("/")
+    if len(parts) < 2:
+        return ""
+    owner, repo = parts[0], parts[1]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+        return ""
+    return f"{owner.lower()}/{repo.lower()}"
+
+
+def _field_as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
 
 
 def _filter_readings_to_task(readings: list[dict[str, Any]], task: dict[str, Any]) -> list[dict[str, Any]]:
