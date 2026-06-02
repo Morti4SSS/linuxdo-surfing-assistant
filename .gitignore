@@ -1,6 +1,9 @@
 # Runtime outputs and local state
 output/
 state/
+obsidian/
+data/
+config/knowledge_sources.json
 .worktrees/
 worktrees/
 
