@@ -64,53 +64,52 @@ Linux.do 帖子/回复和 GitHub issue / discussion 中的内容先进入证据�
 
 ## Vault 结构
 
-建议在当前 vault 上最小演进，而不是立刻大迁移：
+建议把 Obsidian vault 调整为“人类阅读优先”的编号结构：常看的内容在前，底层来源和证据进入 `_system/`。
 
 ```text
 LinuxDo-AI-Knowledge/
   AGENTS.md
   CLAUDE.md
-  index.md
-  log.md
-  hot.md
 
-  raw/
-    sources/
+  00_Home/
+    index.md
+    hot.md
+    log.md
 
-  evidence/
-    linuxdo/
-    github/
-
-  claims/
-    active/
-    disputed/
-    stale/
-
-  catalog/
-    candidates/
+  10_Catalog/
     resources/
+    candidates/
     comparisons/
     workflows/
     categories/
     archive/
 
-  feedback/
+  20_Knowledge/
+    concepts/
+    practices/
+    claims/
+    notes/
+    drafts/
+
+  30_Feedback/
     preferences/
     decisions/
     rejections/
 
-  inbox/
-    sessions/
+  90_Inbox/
     review-queue/
+    sessions/
 
-  wiki/
-    concepts/
-    practices/
-    notes/
-    drafts/
+  _system/
+    sources/
+      linuxdo/
+      github/
+    evidence/
+      linuxdo/
+      github/
 ```
 
-当前已有的 `catalog/`、`wiki/`、`inbox/sessions/` 保留。新增重点是 `evidence/`、`claims/`、`feedback/`、`hot.md` 和更强的 `AGENTS.md / CLAUDE.md`。
+当前已有的 `catalog/`、`wiki/`、`inbox/sessions/` 内容应迁移到对应的新目录，文件名尽量保持不变，让 Obsidian wikilink 继续可解析。新增重点是 `_system/sources/`、`_system/evidence/`、`20_Knowledge/claims/`、`30_Feedback/`、`00_Home/hot.md` 和更强的 `AGENTS.md / CLAUDE.md`。
 
 ## 页面类型
 
@@ -206,6 +205,19 @@ LinuxDo-AI-Knowledge/
 - `decisions/`：采用、观察、跳过
 - `rejections/`：拒绝某个 draft、claim 或资源判断的原因
 
+## 反馈同步
+
+Obsidian 反馈不是由 agent 每次全量阅读 vault 获得。`feedback-sync` 必须使用轻量变更检测：
+
+1. 扫描 `30_Feedback/`、`90_Inbox/review-queue/` 和资源卡中的受保护人类反馈区。
+2. 对每个候选文件记录 `mtime`、`size`、`content_hash` 和 `feedback_hash`。
+3. 未变化文件完全不读。
+4. 已变化文件只抽取 frontmatter、`## 我的反馈`、`## 我的判断`、`## 拒绝原因` 等人类区块。
+5. 本地脚本把结果写成紧凑 JSON，例如 `state/knowledge/user_feedback.json`。
+6. 下一轮 `knowledge-plan` 只读取这个轻量反馈索引，不读取完整 Obsidian 页面。
+
+如果用户手改了 agent 生成区，sync 应把页面标记为 `human_touched`，避免后续自动重写；只有用户明确要求或 review queue 需要处理时，agent 才读该页相关片段。
+
 ## AGENTS.md / CLAUDE.md 规则层
 
 根规则文件必须从现在的两条规则升级为可执行 schema。
@@ -259,7 +271,7 @@ DOM/文本优先。只有缺少视觉证据、状态证据、布局语义、图�
 3. 为高价值证据写 evidence。
 4. 更新相关 claim/resource/comparison/workflow。
 5. 更新 `index.md`、`log.md` 和 `hot.md`。
-6. 把需要人判断的内容放入 `inbox/review-queue/`。
+6. 把需要人判断的内容放入 `90_Inbox/review-queue/`。
 
 ## 更新和过时处理
 
@@ -275,8 +287,8 @@ DOM/文本优先。只有缺少视觉证据、状态证据、布局语义、图�
 
 - 小补充：只更新 evidence 和 hot/log。
 - 结论变化：更新 claim，资源卡增加“判断变化”。
-- 争议未解：claim 移到 `claims/disputed/`。
-- 明显过时：claim 移到 `claims/stale/`，资源卡标记 `staleness_risk`。
+- 争议未解：claim 页面标记 `status: disputed`。
+- 明显过时：claim 页面标记 `status: stale`，资源卡标记 `staleness_risk`。
 
 ## Lint / 维护
 
@@ -287,7 +299,7 @@ DOM/文本优先。只有缺少视觉证据、状态证据、布局语义、图�
 - 孤立资源卡。
 - 没有 evidence 的 claim。
 - 没有反方检查的强结论。
-- `stale` 但仍被 workflow 引用的 claim。
+- `status: stale` 但仍被 workflow 引用的 claim。
 - 资源卡和对比页的双链缺失。
 - `## 我的反馈` 是否被保留。
 - review queue 是否长期堆积。
@@ -299,7 +311,7 @@ DOM/文本优先。只有缺少视觉证据、状态证据、布局语义、图�
 应做：
 
 - 新增或更新 vault 规则文件。
-- 新增 `evidence/`、`claims/`、`feedback/`、`inbox/review-queue/` 目录。
+- 新增 `_system/evidence/`、`_system/sources/`、`20_Knowledge/claims/`、`30_Feedback/`、`90_Inbox/review-queue/` 目录。
 - 增强 `knowledge-session` 的 Obsidian 写入逻辑，使它能写 evidence/claim/resource/comparison。
 - 增强 `feedback-sync`，同步 decisions/preferences/rejections。
 - 让 `knowledge-plan` 更明确地使用 Level 0-3 阅读级别和旧 topic 增量策略。
@@ -323,6 +335,6 @@ DOM/文本优先。只有缺少视觉证据、状态证据、布局语义、图�
 ## 第一阶段决策
 
 - 按“最小演进当前 vault”实施，不重建新 vault。
-- `evidence/` 和 `claims/` 作为新增一等目录。
+- `_system/evidence/` 作为底层证据目录，`20_Knowledge/claims/` 作为人可偶尔查看的观点目录。
 - `AGENTS.md` 作为 Codex 主规则入口，`CLAUDE.md` 与其保持同义镜像或明确指向。
 - 不迁移旧 30 批历史；只让新批次先按新结构写入，旧历史后续单独做迁移设计。
