@@ -11,13 +11,13 @@
 - 机器持久化层：`state/knowledge/`，负责去重、增量阅读、队列、反馈同步。
 - Obsidian 知识层：给人阅读、修改、整理、反馈。
 
-这次修订补上一个核心缺口：Linux.do、评论区、GitHub issue、视频评论不是稳定资料。它们会错、会被新回复纠正、会过时，也会出现“主帖一般但回复很强”的情况。因此第一版 vault 不能只做资源卡和批次总结，必须引入证据层、观点层和规则层，避免把论坛噪音编译成永久知识。
+这次修订补上一个核心缺口：Linux.do 帖子、Linux.do 回复和 GitHub issue / discussion 不是稳定资料。它们会错、会被新回复纠正、会过时，也会出现“主帖一般但回复很强”的情况。因此第一版 vault 不能只做资源卡和批次总结，必须引入证据层、观点层和规则层，避免把论坛噪音编译成永久知识。
 
 本设计参考 Karpathy LLM Wiki 的 `raw -> wiki -> schema` 模式，也参考了社区实现中较成熟的机制：`index/log/hot`、lint、citation、人工拒绝反馈、手改保护、增量编译和反论点检查。对本项目而言，这些机制只选择轻量子集，不引入重型自治 wiki。
 
 ## 目标
 
-构建一个面向 AI coding / skills / plugins / workflows / agents / tools 的知识库工作流，让 Codex 可以持续从 Linux.do、GitHub 和网页中发现线索，同时把内容沉淀为可追溯、可更新、可被人修正的 Obsidian 知识。
+构建一个面向 AI coding / skills / plugins / workflows / agents / tools 的知识库工作流，让 Codex 可以持续从 Linux.do 和 GitHub 中发现线索，同时把内容沉淀为可追溯、可更新、可被人修正的 Obsidian 知识。
 
 成功标准：
 
@@ -35,7 +35,7 @@
 - 全量迁移旧 30 批历史。
 - 全量镜像 Linux.do 帖子。
 - 定时主动巡检所有旧 topic。
-- 把截图、网页全文或评论全文长期塞进上下文。
+- 把截图、帖子全文、issue 全文或回复全文长期塞进上下文。
 - 上来引入复杂 Obsidian REST / MCP / WebDAV 自动化。
 - 让 agent 自动重写人类手改区。
 - 建一个独立图谱 UI 或完整数据库产品。
@@ -44,7 +44,7 @@
 
 ### 1. 证据优先，知识后置
 
-论坛、评论和 issue 中的内容先进入证据层。只有当证据足够、来源清楚、反方已检查、时间风险可接受时，才升级到观点卡、资源卡或工作流页。
+Linux.do 帖子/回复和 GitHub issue / discussion 中的内容先进入证据层。只有当证据足够、来源清楚、反方已检查、时间风险可接受时，才升级到观点卡、资源卡或工作流页。
 
 ### 2. 不把热度当真理
 
@@ -80,8 +80,6 @@ LinuxDo-AI-Knowledge/
   evidence/
     linuxdo/
     github/
-    web/
-    video/
 
   claims/
     active/
@@ -123,7 +121,7 @@ LinuxDo-AI-Knowledge/
 字段：
 
 - `id`
-- `source_type`: `linuxdo_topic | linuxdo_reply | github_repo | github_issue | web_page | video | comment_thread`
+- `source_type`: `linuxdo_topic | linuxdo_reply | github_repo | github_issue | github_discussion | github_release | github_pr`
 - `url`
 - `title`
 - `author`
@@ -250,7 +248,7 @@ LinuxDo-AI-Knowledge/
 - Level 2：主帖 + 热门/争议/链接/作者回复 + 对话链上下文。
 - Level 3：深读整帖或大部分回复，适合争议、对比、实测串。
 
-DOM/文本优先。只有缺少视觉证据、状态证据、布局语义、图片内容、视频画面或关键内容时才 render。
+DOM/文本优先。只有缺少视觉证据、状态证据、布局语义、图片内容或关键内容时才 render。
 
 ### 写入时
 
