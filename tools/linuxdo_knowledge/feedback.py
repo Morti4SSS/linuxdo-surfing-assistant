@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from copy import deepcopy
 import re
 from pathlib import Path
@@ -10,6 +11,20 @@ from .state import JSON_DEFAULTS, load_json, now_iso, paths_for, save_hot_index
 
 
 FEEDBACK_HEADING = "## 我的反馈"
+HUMAN_SECTION_HEADINGS = ("我的反馈", "我的判断", "拒绝原因", "采用理由", "观察")
+FEEDBACK_SCAN_DIRECTORIES = (
+    "10_Catalog/resources",
+    "10_Catalog/services",
+    "10_Catalog/collections",
+    "10_Catalog/candidates",
+    "10_Catalog/comparisons",
+    "10_Catalog/workflows",
+    "20_Knowledge/concepts",
+    "20_Knowledge/components",
+    "20_Knowledge/claims",
+    "30_Feedback",
+    "90_Inbox/review-queue",
+)
 
 
 def sync_feedback(config: KnowledgeConfig, synced_at: str | None = None) -> dict[str, int]:
@@ -24,14 +39,24 @@ def sync_feedback(config: KnowledgeConfig, synced_at: str | None = None) -> dict
         stat = path.stat()
         file_key = str(path)
         previous = known_files.get(file_key, {})
-        if isinstance(previous, dict) and float(previous.get("mtime", -1)) >= stat.st_mtime:
+        if (
+            isinstance(previous, dict)
+            and float(previous.get("mtime", -1)) >= stat.st_mtime
+            and int(previous.get("size", -1)) == stat.st_size
+        ):
             continue
 
         parsed = parse_markdown_page(path)
         if parsed.get("id"):
             _record_feedback(indexes["user_feedback"], parsed, path, synced)
             _record_status(indexes["resource_index"], indexes["claim_index"], parsed, path)
-        known_files[file_key] = {"mtime": stat.st_mtime, "last_synced_at": synced}
+        known_files[file_key] = {
+            "mtime": stat.st_mtime,
+            "size": stat.st_size,
+            "content_hash": parsed.get("content_hash", ""),
+            "feedback_hash": parsed.get("feedback_hash", ""),
+            "last_synced_at": synced,
+        }
         changed += 1
 
     sync_state["last_sync_at"] = synced
@@ -46,10 +71,13 @@ def parse_markdown_page(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     frontmatter = _parse_frontmatter(text)
     title_match = re.search(r"^#\s+(.+)$", text, flags=re.MULTILINE)
+    feedback = _extract_feedback(text)
     return {
         "path": str(path),
         "title": title_match.group(1).strip() if title_match else path.stem,
-        "feedback": _extract_feedback(text),
+        "feedback": feedback,
+        "content_hash": _sha256(text),
+        "feedback_hash": _sha256(feedback),
         **frontmatter,
     }
 
@@ -57,7 +85,12 @@ def parse_markdown_page(path: Path) -> dict[str, Any]:
 def _markdown_files(root: Path) -> list[Path]:
     if not root.exists():
         return []
-    return sorted(path for path in root.rglob("*.md") if path.is_file())
+    files: list[Path] = []
+    for relative_dir in FEEDBACK_SCAN_DIRECTORIES:
+        directory = root / relative_dir
+        if directory.exists():
+            files.extend(path for path in directory.rglob("*.md") if path.is_file())
+    return sorted(files)
 
 
 def _parse_frontmatter(text: str) -> dict[str, str]:
@@ -76,13 +109,28 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
 
 
 def _extract_feedback(text: str) -> str:
-    if FEEDBACK_HEADING not in text:
+    sections = _extract_human_sections(text)
+    if not sections:
         return ""
-    feedback = text.split(FEEDBACK_HEADING, 1)[1]
-    match = re.search(r"\n#{1,2}\s+\S", feedback)
-    if match:
-        feedback = feedback[: match.start()]
-    return feedback.strip()
+    if "我的反馈" in sections:
+        return sections["我的反馈"]
+    return "\n\n".join(f"## {heading}\n{body}" for heading, body in sections.items() if body).strip()
+
+
+def _extract_human_sections(text: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    pattern = re.compile(r"^##\s+(.+?)\s*$", flags=re.MULTILINE)
+    matches = list(pattern.finditer(text))
+    for index, match in enumerate(matches):
+        heading = match.group(1).strip()
+        if heading not in HUMAN_SECTION_HEADINGS:
+            continue
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[start:end].strip()
+        if body:
+            result[heading] = body
+    return result
 
 
 def _record_feedback(feedback_state: dict[str, Any], parsed: dict[str, Any], path: Path, synced_at: str) -> None:
@@ -97,9 +145,12 @@ def _record_feedback(feedback_state: dict[str, Any], parsed: dict[str, Any], pat
         "title": str(parsed.get("title", "")),
         "path": str(path),
         "feedback": str(parsed.get("feedback", "")),
+        "feedback_hash": str(parsed.get("feedback_hash", "")),
         "status": str(parsed.get("status", "")),
         "synced_at": synced_at,
     }
+    if "watchlist" in parsed:
+        payload["watchlist"] = _parse_bool(parsed.get("watchlist"))
     existing = next((item for item in items if isinstance(item, dict) and item.get("id") == item_id), None)
     if existing is None:
         items.append(payload)
@@ -118,10 +169,20 @@ def _record_status(
     payload = {"last_feedback_path": str(path)}
     if status:
         payload["status"] = status
+    if "watchlist" in parsed:
+        payload["watchlist"] = _parse_bool(parsed.get("watchlist"))
     if item_id.startswith(("resource:", "candidate:")):
         resource_index.setdefault("resources", {}).setdefault(item_id, {}).update(payload)
     if item_id.startswith("claim:"):
         claim_index.setdefault("claims", {}).setdefault(item_id, {}).update(payload)
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _parse_bool(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "是"}
 
 
 def _normalize_feedback_indexes(indexes: dict[str, Any]) -> None:

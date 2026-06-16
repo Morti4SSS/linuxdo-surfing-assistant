@@ -83,6 +83,6 @@ Keep detailed notes in the reading/session files. The final answer should be a d
 
 ## Browser Discipline
 
-Linux.do reading depends on saved login state. If Codex 内置浏览器 is not logged in, ask the user to log in. Do not scrape protected content with unauthenticated HTTP. Do not use computer-use for ordinary post reading.
+Linux.do reading depends on saved login state. If Codex 内置浏览器 is not logged in, ask the user to log in. If any topic cannot be read because extraction, login, challenge, loading, or permission state needs human help, pause and report the URL, visible state, and failed method before continuing. Do not scrape protected content with unauthenticated HTTP. Do not use computer-use for ordinary post reading.
 
 For active-old posts, read historical context. For low-traffic posts, spend limited budget and mark whether the post is worth deeper follow-up.

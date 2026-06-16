@@ -100,6 +100,8 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(task["budget"], {"max_topics": 3, "max_replies_per_topic": 5})
         self.assertEqual(task["candidates"][0]["id"], 2)
         self.assertIn("Codex 内置浏览器", task["instructions"])
+        self.assertIn("读帖异常规则", task["instructions"])
+        self.assertIn("立刻暂停", task["instructions"])
 
     def test_build_browser_task_defaults_to_codex_browser_channel(self):
         task = linuxdo_surf.build_browser_task(
@@ -274,6 +276,9 @@ class LinuxdoSurfTests(unittest.TestCase):
             "knowledge-init",
             "knowledge-plan",
             "knowledge-session",
+            "knowledge-index-audit",
+            "knowledge-rebuild-evidence",
+            "knowledge-repair-audit-issues",
         ]:
             with self.subTest(command=command):
                 self.assertIn(command, help_text)
@@ -347,6 +352,266 @@ class LinuxdoSurfTests(unittest.TestCase):
         self.assertEqual(github_task["next_batch"]["searches"][0]["query"], "codex workflow skill")
         self.assertEqual(visual_exit, 0)
         self.assertEqual([item["id"] for item in visual_task["items"]], [7])
+
+    def test_knowledge_repair_audit_issues_defaults_to_batched_limit(self):
+        parser = linuxdo_surf.build_parser()
+
+        args = parser.parse_args(["knowledge-repair-audit-issues"])
+
+        self.assertEqual(args.limit, 500)
+        self.assertFalse(args.apply)
+
+    def test_cli_knowledge_session_writes_batch_manifest_and_audit_paths(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            state_root = tmp_path / "state" / "knowledge"
+            vault = tmp_path / "vault"
+            config_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "obsidian_vault_path": str(vault),
+                        "state_root": str(state_root),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            renamed_page = vault / "10_Catalog" / "archive" / "Human-Renamed-Tool.md"
+            renamed_page.parent.mkdir(parents=True)
+            renamed_page.write_text(
+                "---\nid: resource:tool\ntype: resource\nstatus: candidate\n---\n\n# Human Renamed Tool\n",
+                encoding="utf-8",
+            )
+            task_path = tmp_path / "knowledge_task_latest.json"
+            readings_path = tmp_path / "knowledge_readings_surf_001.json"
+            output_path = tmp_path / "out" / "knowledge_session_result_surf_001.json"
+            manifest_path = tmp_path / "out" / "batch_manifest_surf_001.json"
+            audit_paths_path = tmp_path / "out" / "batch_manifest_surf_001_paths.txt"
+            task_path.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {"topic_id": 901, "title": "Tool 反馈", "url": "https://linux.do/t/topic/901"},
+                            {"topic_id": 902, "title": "跳过项", "action": "skip"},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            readings_path.write_text(
+                json.dumps(
+                    {
+                        "readings": [
+                            {
+                                "topic_id": 901,
+                                "title": "Tool 反馈",
+                                "url": "https://linux.do/t/topic/901",
+                                "status": "metadata_only",
+                                "reading_level": 1,
+                                "resources": [{"id": "resource:tool", "name": "Tool"}],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "knowledge-session",
+                    "--config",
+                    str(config_path),
+                    "--task",
+                    str(task_path),
+                    "--readings",
+                    str(readings_path),
+                    "--batch-id",
+                    "surf-001",
+                    "--output",
+                    str(output_path),
+                    "--batch-manifest-output",
+                    str(manifest_path),
+                    "--audit-paths-output",
+                    str(audit_paths_path),
+                ]
+            )
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            audit_paths = audit_paths_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result, {"readings": 1})
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["batch_id"], "surf-001")
+        self.assertEqual(manifest["counts"]["task_items"], 2)
+        self.assertEqual(manifest["counts"]["readings"], 1)
+        self.assertEqual(manifest["selected_topic_ids"], [901, 902])
+        self.assertEqual(manifest["read_topic_ids"], [901])
+        self.assertEqual(manifest["status_counts"], {"metadata_only": 1})
+        self.assertEqual(manifest["reading_level_counts"], {"1": 1})
+        self.assertEqual(manifest["gate_status"], "warn")
+        self.assertEqual(manifest["metadata_only_level_mismatch"][0]["topic_id"], 901)
+        self.assertEqual(manifest["skip_without_reason"][0]["topic_id"], 902)
+        self.assertIn("10_Catalog/archive/Human-Renamed-Tool.md", audit_paths)
+        self.assertTrue(all(path.endswith(".md") and not path.startswith("/") for path in audit_paths))
+
+    def test_cli_knowledge_index_audit_reports_state_and_batch_issues(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            state_root = tmp_path / "state" / "knowledge"
+            readings_dir = tmp_path / "out" / "linuxdo_surf"
+            output_path = tmp_path / "out" / "index_audit_latest.json"
+            config_path.parent.mkdir()
+            readings_dir.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "obsidian_vault_path": str(tmp_path / "vault"),
+                        "state_root": str(state_root),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            state_root.mkdir(parents=True)
+            (state_root / "topic_index.json").write_text(
+                json.dumps({"topics": {"901": {"topic_id": 901, "title": "Tool 反馈"}}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (state_root / "topic_update_state.json").write_text(
+                json.dumps({"topics": {"901": {"topic_id": 901}}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (state_root / "resource_index.json").write_text(
+                json.dumps(
+                    {"resources": {"resource:tool": {"id": "resource:tool", "evidence_status": "legacy_summary"}}},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (state_root / "claim_index.json").write_text(
+                json.dumps(
+                    {"claims": {"claim:tool": {"id": "claim:tool", "evidence_status": "legacy_summary"}}},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (state_root / "user_feedback.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {"id": "resource:tool", "feedback": "保留观察"},
+                            {"id": "claim:tool", "feedback": ""},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            shard = state_root / "evidence_shards" / "2026-06.jsonl"
+            shard.parent.mkdir(parents=True)
+            shard.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "id": "evidence:dup",
+                                "claim_ids": ["claim:missing"],
+                                "resource_ids": ["resource:tool"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps({"id": "evidence:dup", "claim_ids": ["claim:tool"]}, ensure_ascii=False),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (readings_dir / "knowledge_readings_surf_001.json").write_text(
+                json.dumps(
+                    {
+                        "readings": [
+                            {"topic_id": 901, "status": "metadata_only", "reading_level": 1},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "knowledge-index-audit",
+                    "--config",
+                    str(config_path),
+                    "--readings-dir",
+                    str(readings_dir),
+                    "--output",
+                    str(output_path),
+                ]
+            )
+            audit = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(audit["counts"]["topic_count"], 1)
+        self.assertEqual(audit["counts"]["resource_count"], 1)
+        self.assertEqual(audit["counts"]["claim_count"], 1)
+        self.assertEqual(audit["counts"]["evidence_count"], 2)
+        self.assertEqual(audit["issue_counts"]["duplicate_evidence_ids"], 1)
+        self.assertEqual(audit["issue_counts"]["duplicate_evidence_ids_unreviewed"], 1)
+        self.assertEqual(audit["issue_counts"]["legacy_status"], 2)
+        self.assertEqual(audit["issue_counts"]["empty_category"], 1)
+        self.assertEqual(audit["issue_counts"]["topic_update_missing"], 1)
+        self.assertEqual(audit["issue_counts"]["metadata_only_level_mismatch"], 1)
+        self.assertEqual(audit["issue_counts"]["broken_evidence_refs"], 1)
+        self.assertEqual(audit["feedback"]["nonempty_count"], 1)
+        self.assertEqual(audit["feedback"]["empty_count"], 1)
+
+    def test_cli_knowledge_lint_writes_actionable_protocol_report(self):
+        with TemporaryDirectoryPath() as tmp_path:
+            config_path = tmp_path / "config" / "knowledge_sources.json"
+            state_root = tmp_path / "state" / "knowledge"
+            output_path = tmp_path / "out" / "knowledge_lint_latest.json"
+            config_path.parent.mkdir()
+            output_path.parent.mkdir()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "obsidian_vault_path": str(tmp_path / "vault"),
+                        "state_root": str(state_root),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            state_root.mkdir(parents=True)
+            (state_root / "claim_index.json").write_text(
+                json.dumps({"claims": {"claim:orphan": {"id": "claim:orphan", "status": "active"}}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (state_root / "resource_index.json").write_text(json.dumps({"resources": {}}, ensure_ascii=False), encoding="utf-8")
+            (state_root / "evidence_by_claim.json").write_text(json.dumps({"claims": {}}, ensure_ascii=False), encoding="utf-8")
+            (state_root / "evidence_by_resource.json").write_text(json.dumps({"resources": {}}, ensure_ascii=False), encoding="utf-8")
+
+            exit_code = linuxdo_surf.main(
+                [
+                    "knowledge-lint",
+                    "--config",
+                    str(config_path),
+                    "--output",
+                    str(output_path),
+                    "--limit",
+                    "10",
+                ]
+            )
+            report = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(report["issue_counts"]["orphan_claims"], 1)
+        self.assertEqual(report["next_actions"][0]["action"], "attach_source_evidence")
 
     def test_scripts_entrypoint_delegates_to_tools_helper(self):
         script_path = MODULE_PATH.parents[1] / "scripts" / "linuxdo_surf.py"

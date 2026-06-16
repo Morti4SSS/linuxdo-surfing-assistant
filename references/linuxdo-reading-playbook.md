@@ -19,6 +19,8 @@ Read in this order:
 5. Replies containing Linux.do links, tool names, GitHub links, warnings, comparisons, or concrete setup steps.
 6. 每帖 JSON 深读后必须判断 `render_required`; if true, open the original rendered page/images before making the final judgment when budget allows.
 
+If JSON/DOM/text extraction fails, compare with the visible rendered topic before making an access judgment. If login, challenge, loading, permission, or page state blocks content, try Chrome once only when the user already approved Chrome fallback. If live reading still fails, pause the run and tell the user the URL, visible state, failed method, and requested intervention. Do not mark the topic as blocked, skip source review, or use old source extracts, old summaries, `readings_all.json`, or prior Obsidian notes as a substitute unless the user approves that fallback after the pause.
+
 For active old topics, do not treat the newest reply as the whole story. Capture original context, historical correction, and recent update separately.
 
 Set `render_required=true` when the title, body, or replies contain 多图, 截图, 图片, 演示, 视频, UI, WebUI, 前端, 审美, 卡片, 可视化, dashboard, 状态栏, 流程图, 执行链路, review-fix, lite-plan, tutorial/install/config/build/PowerShell/error-screenshot language, document/layout output claims, or visual references like 如图, 看图, 上图, 下图, 截图里, 效果如下.

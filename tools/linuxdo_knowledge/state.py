@@ -17,11 +17,16 @@ class KnowledgePaths:
     topic_update_state: Path
     resource_index: Path
     claim_index: Path
+    evidence_index: Path
+    evidence_by_claim: Path
+    evidence_by_resource: Path
+    counter_evidence_queue: Path
     feedback_sync_state: Path
     user_feedback: Path
     frontier_queue: Path
     bookmark_source_index: Path
     session_log: Path
+    claim_events: Path
     topic_summaries: Path
     evidence_shards: Path
     archive: Path
@@ -32,6 +37,10 @@ JSON_DEFAULTS = {
     "topic_update_state": {"topics": {}},
     "resource_index": {"resources": {}},
     "claim_index": {"claims": {}},
+    "evidence_index": {"evidence": {}},
+    "evidence_by_claim": {"claims": {}},
+    "evidence_by_resource": {"resources": {}},
+    "counter_evidence_queue": {"items": []},
     "feedback_sync_state": {"last_sync_at": None, "files": {}},
     "user_feedback": {"items": []},
     "frontier_queue": {"items": []},
@@ -50,11 +59,16 @@ def paths_for(config: KnowledgeConfig) -> KnowledgePaths:
         topic_update_state=root / "topic_update_state.json",
         resource_index=root / "resource_index.json",
         claim_index=root / "claim_index.json",
+        evidence_index=root / "evidence_index.json",
+        evidence_by_claim=root / "evidence_by_claim.json",
+        evidence_by_resource=root / "evidence_by_resource.json",
+        counter_evidence_queue=root / "counter_evidence_queue.json",
         feedback_sync_state=root / "feedback_sync_state.json",
         user_feedback=root / "user_feedback.json",
         frontier_queue=root / "frontier_queue.json",
         bookmark_source_index=root / "bookmark_source_index.json",
         session_log=root / "session_log.jsonl",
+        claim_events=root / "claim_events.jsonl",
         topic_summaries=root / "topic_summaries",
         evidence_shards=root / "evidence_shards",
         archive=root / "archive",
@@ -75,6 +89,8 @@ def ensure_knowledge_state(config: KnowledgeConfig) -> KnowledgePaths:
 
     if not paths.session_log.exists():
         paths.session_log.write_text("", encoding="utf-8")
+    if not paths.claim_events.exists():
+        paths.claim_events.write_text("", encoding="utf-8")
 
     return paths
 
@@ -124,6 +140,13 @@ def append_evidence(config: KnowledgeConfig, evidence: dict[str, Any], observed_
     path = paths.evidence_shards / f"{shard_month}.jsonl"
     append_jsonl(path, {**evidence, "observed_at": observed})
     return path
+
+
+def append_claim_event(config: KnowledgeConfig, event: dict[str, Any], observed_at: str | None = None) -> Path:
+    paths = ensure_knowledge_state(config)
+    observed = observed_at or now_iso()
+    append_jsonl(paths.claim_events, {**event, "observed_at": observed})
+    return paths.claim_events
 
 
 def maintain_state(config: KnowledgeConfig, maintained_at: str | None = None) -> dict[str, int]:

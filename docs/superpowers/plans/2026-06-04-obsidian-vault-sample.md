@@ -190,3 +190,35 @@ git commit -m "docs: plan obsidian vault sample"
 ```
 
 Expected: commit succeeds. Vault changes are outside this git repo and are not committed here.
+
+### Task 5: Organize Existing Readings
+
+**Files:**
+- Modify: `/Users/mortisss/Documents/linuxdo/tools/linuxdo_surf.py`
+- Modify: `/Users/mortisss/Documents/linuxdo/tools/linuxdo_knowledge/obsidian.py`
+- Modify: `/Users/mortisss/Documents/linuxdo/tools/linuxdo_knowledge/session.py`
+- Modify: `/Users/mortisss/Documents/linuxdo/tools/linuxdo_knowledge/feedback.py`
+- Add: `/Users/mortisss/Documents/linuxdo/tools/linuxdo_knowledge/legacy.py`
+- Modify: `/Users/mortisss/Documents/Obsidian/LinuxDo-AI-Knowledge`
+
+- [ ] **Step 1: Align tool writes with numbered vault layout**
+
+Make `knowledge-init`, `knowledge-session`, `feedback-sync`, and `knowledge-maintain` use `00_Home/`, `10_Catalog/`, `20_Knowledge/`, `30_Feedback/`, `90_Inbox/`, and `_system/`.
+
+- [ ] **Step 2: Add existing-reading organization command**
+
+Add `knowledge-migrate-legacy` to convert `output/linuxdo_surf/readings_all.json` without rereading webpages. It should write source/evidence 底账 for historical sources, machine session records, and a limited set of high-frequency resource candidate cards. Human-facing cards should use neutral wording such as “累计证据” and “来源证据摘要”, not batch or legacy labels.
+
+- [ ] **Step 3: Run migration**
+
+Run:
+
+```bash
+python3 tools/linuxdo_surf.py knowledge-migrate-legacy \
+  --config config/knowledge_sources.json \
+  --input output/linuxdo_surf/readings_all.json \
+  --batch-size 20 \
+  --resource-limit 120
+```
+
+Expected: 611 legacy readings are migrated into state and vault without loading old webpages.

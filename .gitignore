@@ -1,5 +1,6 @@
 # Runtime outputs and local state
 output/
+outputs/
 state/
 obsidian/
 data/
@@ -10,6 +11,7 @@ worktrees/
 # Python generated files
 __pycache__/
 *.py[cod]
+.DS_Store
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
